@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# uv virtual environment (uv.lock is committed)
+.venv/
+
+# Tool caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Editors and OS
+.idea/
+.DS_Store

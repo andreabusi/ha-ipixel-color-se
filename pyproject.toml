@@ -1,0 +1,92 @@
+# Development tooling only: the integration itself is not a Python package.
+# Home Assistant installs its runtime requirements from manifest.json.
+[project]
+name = "ha-ipixel-color-se"
+version = "0.1.0"
+description = "Home Assistant integration for iPixel Color Bluetooth LED displays"
+readme = "README.md"
+license = "GPL-3.0-only"
+requires-python = ">=3.14.2"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    # 0.13.371 pins homeassistant==2026.10.0, the minimum version we support
+    "pytest-homeassistant-custom-component==0.13.371",
+    # Keep in sync with the requirement in manifest.json
+    "pypixelcolor==0.5.0",
+    "ruff",
+    # Requirements of HA's bluetooth and usb integrations, which we depend on
+    # through bluetooth_adapters. pytest-homeassistant-custom-component doesn't
+    # install them. Versions from the HA 2026.10.0 manifests.
+    "aiousbwatcher==1.1.2",
+    "dbus-fast==5.0.22",
+    "serialx==1.11.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py314"
+line-length = 88
+# Ruff also formats code blocks in Markdown: leave the design documents alone
+extend-exclude = ["specs"]
+
+[tool.ruff.lint]
+select = [
+    "A",     # flake8-builtins
+    "ASYNC", # flake8-async
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "D",     # pydocstyle
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "FLY",   # flynt
+    "G",     # flake8-logging-format
+    "I",     # isort
+    "LOG",   # flake8-logging
+    "N",     # pep8-naming
+    "PERF",  # perflint
+    "PGH",   # pygrep-hooks
+    "PIE",   # flake8-pie
+    "PL",    # pylint
+    "PT",    # flake8-pytest-style
+    "PTH",   # flake8-use-pathlib
+    "RET",   # flake8-return
+    "RSE",   # flake8-raise
+    "RUF",   # ruff-specific rules
+    "S",     # flake8-bandit
+    "SIM",   # flake8-simplify
+    "SLF",   # flake8-self
+    "T20",   # flake8-print
+    "TRY",   # tryceratops
+    "UP",    # pyupgrade
+    "W",     # pycodestyle warnings
+]
+ignore = [
+    "D202",    # blank line after function docstring, as in Home Assistant
+    "E501",    # line length is handled by the formatter
+    "PLR0913", # entity and flow methods often take many arguments
+    "PLR2004", # magic values are fine in protocol code and tests
+    "TRY003",  # long messages in exceptions are fine
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101",   # assert is how pytest works
+    "SLF001", # tests may inspect private members
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+combine-as-imports = true
+known-first-party = ["custom_components.ipixel_color_se"]
