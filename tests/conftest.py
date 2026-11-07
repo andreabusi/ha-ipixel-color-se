@@ -5,12 +5,27 @@ from unittest.mock import patch
 
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
+from pytest_homeassistant_custom_component.syrupy import (
+    HomeAssistantSnapshotExtension,
+)
+from syrupy.assertion import SnapshotAssertion
 
 from custom_components.ipixel_color_se.const import DOMAIN
 
 from .common import ADDRESS, ENTRY_DATA, NAME, FakePanel, service_info
 
 PACKAGE = "custom_components.ipixel_color_se"
+
+
+@pytest.fixture
+def snapshot(snapshot: SnapshotAssertion) -> SnapshotAssertion:
+    """Use HA's snapshot extension: tests/snapshots and HA's serializer.
+
+    pytest-homeassistant-custom-component and syrupy both define this fixture,
+    and which plugin wins depends on the order they are installed in: on
+    Linux, syrupy's plain one can win. A conftest fixture always wins.
+    """
+    return snapshot.use_extension(HomeAssistantSnapshotExtension)
 
 
 @pytest.fixture(autouse=True)
