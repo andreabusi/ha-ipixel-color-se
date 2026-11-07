@@ -34,6 +34,17 @@ class IPixelEntity(Entity):
             name=controller.entry.title,
         )
 
+    @property
+    def available(self) -> bool:
+        """Return whether the entity can be used.
+
+        Controls need the panel connected or in range (T1). Settings and
+        diagnostics are always available: they live in HA.
+        """
+        if self.entity_description.entity_category is None:
+            return self.controller.available
+        return True
+
     async def async_added_to_hass(self) -> None:
         """Follow the controller's changes."""
         self.async_on_remove(

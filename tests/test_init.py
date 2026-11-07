@@ -9,6 +9,8 @@ from homeassistant.core import HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
+from custom_components.ipixel_color_se.const import DOMAIN
+
 from .common import FakePanel
 
 CONNECTED = "binary_sensor.kitchen_pixel_connected"
@@ -32,8 +34,8 @@ async def test_setup_connects(
     assert {"bluetooth_adapters", "media_source"} <= hass.config.components
     assert mock_panel.connected
     assert hass.states.get(CONNECTED).state == STATE_ON
-    # Connecting alone sends nothing: the restore arrives with the controller
-    assert mock_panel.writes == []
+    # Every connection restores the desired state
+    assert mock_panel.commands == ["set_time", "orientation 0", "power on"]
 
 
 async def test_setup_without_the_panel(
@@ -73,6 +75,26 @@ async def test_unload_frees_the_panel(
     await hass.async_block_till_done()
 
     assert mock_config_entry.state is ConfigEntryState.NOT_LOADED
+    assert not mock_panel.connected
+
+
+async def test_remove_deletes_the_saved_state(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Removing the display deletes its Store."""
+    key = f"{DOMAIN}.{mock_config_entry.entry_id}"
+    await setup_entry(hass, mock_config_entry)
+    await mock_config_entry.runtime_data.async_set_power(False)
+    assert await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    assert hass_storage[key]["data"]["power"] is False
+
+    await hass.config_entries.async_remove(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    assert key not in hass_storage
     assert not mock_panel.connected
 
 

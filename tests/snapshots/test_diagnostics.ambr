@@ -20,6 +20,7 @@
       'last_connected': '2026-11-07T18:17:00+00:00',
       'last_disconnected': None,
       'last_error': None,
+      'reachable': True,
     }),
     'entry': dict({
       'data': dict({
@@ -29,6 +30,20 @@
         'width': 32,
       }),
       'title': 'Kitchen Pixel',
+    }),
+    'state': dict({
+      'auto_reconnect': True,
+      'brightness': None,
+      'clock': dict({
+        'format_24h': True,
+        'show_date': True,
+        'style': 0,
+      }),
+      'image': None,
+      'image_fit': 'fill',
+      'mode': None,
+      'orientation': 0,
+      'power': True,
     }),
   })
 # ---

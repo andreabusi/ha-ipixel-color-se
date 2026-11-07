@@ -9,6 +9,24 @@ from custom_components.ipixel_color_se import protocol
 from .common import INFO_FRAME
 
 
+@pytest.mark.parametrize(
+    ("plan", "data"),
+    [
+        (protocol.power(True), "05 00 07 01 01"),
+        (protocol.power(False), "05 00 07 01 00"),
+        (protocol.brightness(1), "05 00 04 80 01"),
+        (protocol.brightness(100), "05 00 04 80 64"),
+        (protocol.orientation(0), "05 00 06 80 00"),
+        (protocol.orientation(3), "05 00 06 80 03"),
+    ],
+)
+def test_simple_commands_wait_for_an_ack(plan: protocol.SendPlan, data: str) -> None:
+    """Power, brightness and orientation are acknowledged (check V9)."""
+    assert plan.windows == (protocol.Window(data=bytes.fromhex(data), ack=True),)
+    assert not plan.final_ack
+    assert not plan.response
+
+
 def test_set_time_expects_the_info_frame() -> None:
     """set_time carries the given time and waits for a response, not an ACK."""
     plan = protocol.set_time(datetime(2026, 11, 7, 19, 17, 2))

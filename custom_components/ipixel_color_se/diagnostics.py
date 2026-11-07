@@ -23,8 +23,10 @@ async def async_get_config_entry_diagnostics(
     service_info = async_last_service_info(hass, address, connectable=False)
     return {
         "entry": {"title": entry.title, "data": dict(entry.data)},
+        "state": controller.state.as_dict(),
         "connection": {
             "connected": controller.connected,
+            "reachable": controller.reachable,
             "last_connected": _isoformat(controller.last_connected),
             "last_disconnected": _isoformat(controller.last_disconnected),
             "last_error": controller.last_error,

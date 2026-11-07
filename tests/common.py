@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 from bleak.backends.device import BLEDevice
+from bleak.exc import BleakError
 from homeassistant.components.bluetooth import BluetoothServiceInfoBleak
 from homeassistant.const import CONF_ADDRESS
 
@@ -27,9 +28,31 @@ ENTRY_DATA = {
 }
 
 
+# Commands by their id and type bytes, as describe() names them
+_COMMANDS = {
+    b"\x01\x80": "set_time",
+    b"\x04\x80": "brightness",
+    b"\x06\x80": "orientation",
+    b"\x07\x01": "power",
+}
+
+
 def ack(command: bytes, status: int = 1) -> bytes:
     """Return the ACK the panel sends for a command: 05 00 <id> <type> <status>."""
     return bytes([0x05, 0x00, command[2], command[3], status])
+
+
+def describe(command: bytes) -> str:
+    """Name a command written to the panel, like "power off" or "brightness 40"."""
+    match _COMMANDS.get(command[2:4]):
+        case "power":
+            return "power on" if command[4] else "power off"
+        case "brightness" | "orientation" as name:
+            return f"{name} {command[4]}"
+        case "set_time":
+            return "set_time"
+        case _:
+            return command.hex(" ")
 
 
 class FakeBleakClient:
@@ -91,24 +114,105 @@ class FakePanel:
 
     set_time gets the info frame, every other command an ACK. Tests change
     responder, info_frame or the error attributes to simulate failures.
+
+    It also stands in for HA's Bluetooth manager: present is whether the
+    manager has the panel in its history, and advertise(), vanish(),
+    lose_power() and power_on() drive the controller's callbacks.
     """
 
     def __init__(self) -> None:
-        """Start powered on and in range."""
+        """Start powered on, with the screen on, and in range."""
         self.present = True
+        self.powered = True
+        self.screen_on = True
         self.info_frame = INFO_FRAME
         self.connect_error: Exception | None = None
         self.notify_error: Exception | None = None
         self.write_error: Exception | None = None
         self.writes: list[bytes] = []
+        self.connect_attempts = 0
         self.clients: list[FakeBleakClient] = []
         self.responder: Callable[[bytes], list[bytes]] = self.answer
+        self.advertisement_callbacks: list[
+            Callable[[BluetoothServiceInfoBleak], None]
+        ] = []
+        self.unavailable_callbacks: list[
+            Callable[[BluetoothServiceInfoBleak], None]
+        ] = []
+
+    @property
+    def commands(self) -> list[str]:
+        """Return the commands written so far, named by describe()."""
+        return [describe(data) for data in self.writes]
 
     def answer(self, data: bytes) -> list[bytes]:
-        """Answer a command the way the panel does."""
-        if data[2:4] == b"\x01\x80":
-            return [self.info_frame]
+        """Answer a command the way the panel does.
+
+        Brightness and orientation turn the screen back on (check V1).
+        """
+        match describe(data).split()[0]:
+            case "set_time":
+                return [self.info_frame]
+            case "power":
+                self.screen_on = bool(data[4])
+            case "brightness" | "orientation":
+                self.screen_on = True
         return [ack(data)]
+
+    def advertise(self, *, connectable: bool = True) -> None:
+        """Advertise, as the panel does while powered and not connected (check V4).
+
+        Like HA's Bluetooth manager, call the callbacks before recording the
+        advertisement: until then the panel can't be looked up.
+        """
+        info = service_info(connectable=connectable)
+        for callback in list(self.advertisement_callbacks):
+            callback(info)
+        if connectable:
+            self.present = True
+
+    def vanish(self) -> None:
+        """Be forgotten by HA's Bluetooth manager, after a while without advertising."""
+        self.present = False
+        for callback in list(self.unavailable_callbacks):
+            callback(service_info())
+
+    def lose_power(self) -> None:
+        """Lose power: the connection drops and connecting fails.
+
+        HA's Bluetooth still has the panel in its history until vanish().
+        """
+        self.powered = False
+        for client in self.clients:
+            client.drop()
+
+    def power_on(self) -> None:
+        """Get power back: the screen boots on, and the panel advertises."""
+        self.powered = True
+        self.screen_on = True
+        self.advertise()
+
+    def register_advertisement_callback(
+        self,
+        _hass: object,
+        callback: Callable[[BluetoothServiceInfoBleak], None],
+        _address: str,
+    ) -> Callable[[], None]:
+        """Stand in for bluetooth.async_register_advertisement_callback."""
+        self.advertisement_callbacks.append(callback)
+        return lambda: self.advertisement_callbacks.remove(callback)
+
+    def track_unavailable(
+        self,
+        _hass: object,
+        callback: Callable[[BluetoothServiceInfoBleak], None],
+        _address: str,
+        connectable: bool = True,
+    ) -> Callable[[], None]:
+        """Stand in for bluetooth.async_track_unavailable."""
+        assert connectable
+        self.unavailable_callbacks.append(callback)
+        return lambda: self.unavailable_callbacks.remove(callback)
 
     @property
     def client(self) -> FakeBleakClient:
@@ -133,8 +237,11 @@ class FakePanel:
         **_kwargs: object,
     ) -> FakeBleakClient:
         """Stand in for bleak_retry_connector.establish_connection."""
+        self.connect_attempts += 1
         if self.connect_error:
             raise self.connect_error
+        if not self.powered:
+            raise BleakError(f"{ADDRESS} not found")
         client = FakeBleakClient(self, disconnected_callback)
         self.clients.append(client)
         return client
@@ -144,6 +251,8 @@ def service_info(
     address: str = ADDRESS,
     name: str = BLE_NAME,
     service_uuids: list[str] | None = None,
+    *,
+    connectable: bool = True,
 ) -> BluetoothServiceInfoBleak:
     """Return an advertisement like the panel's."""
     return BluetoothServiceInfoBleak(
@@ -156,7 +265,7 @@ def service_info(
         source="00:00:00:00:00:01",
         device=BLEDevice(address, name, {}),
         advertisement=None,
-        connectable=True,
+        connectable=connectable,
         time=0,
         tx_power=None,
     )

@@ -1,11 +1,40 @@
 {
   "entity": {
+    "button": {
+      "disconnect": {
+        "default": "mdi:bluetooth-off"
+      }
+    },
+    "number": {
+      "brightness": {
+        "default": "mdi:brightness-6"
+      }
+    },
+    "select": {
+      "orientation": {
+        "default": "mdi:screen-rotation"
+      }
+    },
     "sensor": {
       "width": {
         "default": "mdi:arrow-expand-horizontal"
       },
       "height": {
         "default": "mdi:arrow-expand-vertical"
+      }
+    },
+    "switch": {
+      "power": {
+        "default": "mdi:power",
+        "state": {
+          "off": "mdi:power-off"
+        }
+      },
+      "auto_reconnect": {
+        "default": "mdi:bluetooth-connect",
+        "state": {
+          "off": "mdi:bluetooth"
+        }
       }
     }
   }

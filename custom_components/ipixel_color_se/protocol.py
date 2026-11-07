@@ -10,6 +10,9 @@ Everything here is pure: no Home Assistant, no I/O.
 from dataclasses import dataclass
 from datetime import datetime
 
+from pypixelcolor.commands.set_brightness import set_brightness as _set_brightness
+from pypixelcolor.commands.set_orientation import set_orientation as _set_orientation
+from pypixelcolor.commands.set_power import set_power as _set_power
 from pypixelcolor.commands.set_time import set_time as _set_time
 from pypixelcolor.lib.device_info import DEVICE_TYPE_MAP, LED_SIZE_MAP
 from pypixelcolor.lib.transport.send_plan import SendPlan as _PixelSendPlan
@@ -51,6 +54,21 @@ class PanelInfo:
     device_type: int
     width: int
     height: int
+
+
+def power(on: bool) -> SendPlan:
+    """Turn the screen on or off. The panel stays connected either way."""
+    return _convert(_set_power(on))
+
+
+def brightness(level: int) -> SendPlan:
+    """Set the brightness, in percent."""
+    return _convert(_set_brightness(level))
+
+
+def orientation(value: int) -> SendPlan:
+    """Set the orientation, 0 to 3."""
+    return _convert(_set_orientation(value))
 
 
 def set_time(now: datetime) -> SendPlan:

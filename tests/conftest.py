@@ -40,7 +40,11 @@ def auto_enable_bluetooth(enable_bluetooth: None) -> None:
 
 @pytest.fixture
 def mock_panel() -> Generator[FakePanel]:
-    """Put a simulated panel in range, discovered by HA's Bluetooth."""
+    """Put a simulated panel in range, discovered by HA's Bluetooth.
+
+    Patched where our modules import them, so tests drive advertisements
+    and connections through the FakePanel.
+    """
     panel = FakePanel()
     with (
         patch(f"{PACKAGE}.connection.establish_connection", panel.establish_connection),
@@ -49,6 +53,11 @@ def mock_panel() -> Generator[FakePanel]:
             f"{PACKAGE}.controller.async_address_present",
             lambda *_args, **_kwargs: panel.present,
         ),
+        patch(
+            f"{PACKAGE}.controller.async_register_advertisement_callback",
+            panel.register_advertisement_callback,
+        ),
+        patch(f"{PACKAGE}.controller.async_track_unavailable", panel.track_unavailable),
         patch(
             f"{PACKAGE}.config_flow.async_discovered_service_info",
             lambda *_args, **_kwargs: [service_info()] if panel.present else [],

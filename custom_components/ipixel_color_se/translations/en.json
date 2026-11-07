@@ -53,6 +53,27 @@
         "name": "Connected"
       }
     },
+    "button": {
+      "disconnect": {
+        "name": "Disconnect"
+      }
+    },
+    "number": {
+      "brightness": {
+        "name": "Brightness"
+      }
+    },
+    "select": {
+      "orientation": {
+        "name": "Orientation",
+        "state": {
+          "normal": "Normal",
+          "rotated_counterclockwise": "Rotated 90° counterclockwise",
+          "upside_down": "Upside down",
+          "rotated_clockwise": "Rotated 90° clockwise"
+        }
+      }
+    },
     "sensor": {
       "width": {
         "name": "Width"
@@ -60,6 +81,22 @@
       "height": {
         "name": "Height"
       }
+    },
+    "switch": {
+      "power": {
+        "name": "Power"
+      },
+      "auto_reconnect": {
+        "name": "Auto reconnect"
+      }
+    }
+  },
+  "exceptions": {
+    "not_reachable": {
+      "message": "Can't connect to {name}. Check that it's powered on, in range, and not connected to the phone app"
+    },
+    "command_failed": {
+      "message": "{name} didn't accept the command: {error}"
     }
   }
 }
