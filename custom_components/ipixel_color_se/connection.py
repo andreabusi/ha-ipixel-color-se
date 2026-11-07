@@ -247,7 +247,7 @@ class IPixelConnection:
         """Disconnect a client, ignoring errors: it's going away anyway."""
         try:
             await client.disconnect()
-        except BleakError as err:
+        except (BleakError, TimeoutError) as err:
             _LOGGER.debug("Error disconnecting from %s: %s", self._address, err)
 
     @callback
@@ -270,5 +270,12 @@ class IPixelConnection:
         self._client = None
         self._wake_sender()
         _LOGGER.debug("Connection to %s dropped", self._address)
+        # The link is down, but the client still holds its D-Bus connection,
+        # and BlueZ restores that connection's notification sessions on the
+        # next connection: every frame would arrive once more per dropped
+        # connection. Disconnecting closes it.
+        self._hass.async_create_background_task(
+            self._async_close(client), f"close dropped client of {self._address}"
+        )
         if self._on_disconnected:
             self._on_disconnected(False)

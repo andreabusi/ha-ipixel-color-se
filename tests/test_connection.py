@@ -202,6 +202,22 @@ async def test_dropped_connection_while_waiting(
     callbacks.disconnected.assert_called_once_with(False)
 
 
+async def test_dropped_client_is_closed(
+    hass: HomeAssistant, connection: IPixelConnection, mock_panel: FakePanel
+) -> None:
+    """A dropped client is disconnected too, to free what it holds in BlueZ.
+
+    Otherwise BlueZ restores its notification sessions on the next
+    connection, and every frame arrives once more per dropped connection.
+    """
+    dropped = mock_panel.client
+
+    dropped.drop()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert dropped.closed
+
+
 async def test_disconnect(
     connection: IPixelConnection, mock_panel: FakePanel, callbacks: Mock
 ) -> None:

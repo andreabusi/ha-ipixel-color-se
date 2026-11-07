@@ -43,6 +43,7 @@ class FakeBleakClient:
         """Connect to the panel."""
         self.panel = panel
         self.is_connected = True
+        self.closed = False
         self.notifying = False
         self._disconnected_callback = disconnected_callback
         self._notify: Callable[[object, bytearray], None] | None = None
@@ -72,7 +73,8 @@ class FakeBleakClient:
         self._notify(None, bytearray(frame))
 
     async def disconnect(self) -> None:
-        """Disconnect, calling the callback as bleak does."""
+        """Disconnect, calling the callback as bleak does, and free the client."""
+        self.closed = True
         self.drop()
 
     def drop(self) -> None:
