@@ -1,0 +1,12 @@
+{
+  "entity": {
+    "sensor": {
+      "width": {
+        "default": "mdi:arrow-expand-horizontal"
+      },
+      "height": {
+        "default": "mdi:arrow-expand-vertical"
+      }
+    }
+  }
+}

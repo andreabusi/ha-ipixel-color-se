@@ -1,6 +1,16 @@
 {
   "domain": "ipixel_color_se",
   "name": "iPixel Color SE",
+  "bluetooth": [
+    {
+      "local_name": "LED_BLE_*",
+      "connectable": true
+    },
+    {
+      "service_uuid": "0000fa01-0000-1000-8000-00805f9b34fb",
+      "connectable": true
+    }
+  ],
   "codeowners": ["@andreabusi"],
   "config_flow": true,
   "dependencies": ["bluetooth_adapters", "media_source"],

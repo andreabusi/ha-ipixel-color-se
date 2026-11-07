@@ -77,6 +77,9 @@ ignore = [
     "TRY003",  # long messages in exceptions are fine
 ]
 
+# The device model is "LED Pixel Board 32×32"
+allowed-confusables = ["×"]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = [
     "S101",   # assert is how pytest works

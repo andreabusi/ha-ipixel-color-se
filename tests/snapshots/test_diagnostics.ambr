@@ -1,0 +1,34 @@
+# serializer version: 1
+# name: test_diagnostics
+  dict({
+    'bluetooth': dict({
+      'last_advertisement': dict({
+        'connectable': True,
+        'manufacturer_data': dict({
+          '21076': '00 72 00 07 02 00 81',
+        }),
+        'name': 'LED_BLE_CCDDEEFF',
+        'rssi': -62,
+        'service_uuids': list([
+        ]),
+        'source': '00:00:00:00:00:01',
+      }),
+      'reachability': 'unknown (never seen by any scanner); 1 scanner(s) registered, 1 scanning, 1 connectable',
+    }),
+    'connection': dict({
+      'connected': True,
+      'last_connected': '2026-11-07T18:17:00+00:00',
+      'last_disconnected': None,
+      'last_error': None,
+    }),
+    'entry': dict({
+      'data': dict({
+        'address': 'AA:BB:CC:DD:EE:FF',
+        'device_type': 129,
+        'height': 32,
+        'width': 32,
+      }),
+      'title': 'Kitchen Pixel',
+    }),
+  })
+# ---

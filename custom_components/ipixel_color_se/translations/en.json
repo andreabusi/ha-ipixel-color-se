@@ -1,8 +1,65 @@
 {
   "config": {
-    "step": {},
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "description": "Choose an iPixel display in range, or enter its Bluetooth address.",
+        "data": {
+          "address": "Display"
+        }
+      },
+      "bluetooth_confirm": {
+        "description": "Set up {ble_name} ({address})?",
+        "data": {
+          "name": "Name"
+        },
+        "data_description": {
+          "name": "Prefixes the names of all the display's entities. For example, \"Kitchen Pixel\" gives binary_sensor.kitchen_pixel_connected."
+        }
+      },
+      "manual": {
+        "description": "The display must be in range of Home Assistant's Bluetooth adapter or of a Bluetooth proxy.",
+        "data": {
+          "address": "Bluetooth address",
+          "name": "Name"
+        },
+        "data_description": {
+          "address": "For example 12:34:56:78:9A:BC.",
+          "name": "Prefixes the names of all the display's entities. For example, \"Kitchen Pixel\" gives binary_sensor.kitchen_pixel_connected."
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Can't connect to the display. Check that it's powered on, in range, and not connected to the phone app, then try again.",
+      "invalid_address": "Enter a Bluetooth address like 12:34:56:78:9A:BC.",
+      "unsupported_panel": "The display answered, but its type isn't supported.",
+      "unknown": "Unexpected error. Check the Home Assistant log."
+    },
     "abort": {
-      "not_yet_available": "iPixel Color SE can't set up displays yet. Support for adding a display arrives in a later version."
+      "already_configured": "This display is already set up.",
+      "already_in_progress": "This display is already being set up."
+    }
+  },
+  "selector": {
+    "device": {
+      "options": {
+        "manual": "Enter address manually"
+      }
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      }
+    },
+    "sensor": {
+      "width": {
+        "name": "Width"
+      },
+      "height": {
+        "name": "Height"
+      }
     }
   }
 }
