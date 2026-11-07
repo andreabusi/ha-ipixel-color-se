@@ -15,12 +15,12 @@ The design documents in `specs/` are written in Italian and are the source of tr
 
 Work one milestone at a time. Start a milestone only when the user asks, and don't implement anything that belongs to a later one. When a decision changes, update the spec or the plan.
 
-**Current state**: M1 (connection and configuration). Discovery and config flow, `IPixelConnection`, a minimal controller that connects once at startup, the `Connected`, `Width` and `Height` entities, basic diagnostics. There's no reconnection yet: it arrives in M2 with the full controller. Update this line at the end of each milestone.
+**Current state**: M2 (controller and basic commands). `DisplayState` saved in one `Store` per display, the controller with its operation lock, reconnection from advertisements, availability, connection on demand and the restore (plan §4.3, up to the screen on or off). Entities `Power`, `Brightness`, `Orientation`, `Auto reconnect` and `Disconnect`, besides M1's `Connected`, `Width` and `Height`. No `Mode`, clock or images yet: they arrive in M3 and M4. Update this line at the end of each milestone.
 
 ## Conventions
 
 - **Language**: code, identifiers, comments, logs, entity names, entity_ids and UI strings are in English. Talk to the user in Italian; the specs stay in Italian.
-- **Strings**: `translations/en.json` is the only strings file. There is no `strings.json`, because the two diverged in the reference. Icons go in `icons.json`. Hassfest requires `config.step` in `en.json` as soon as there's a config flow, even if it's empty.
+- **Strings**: `translations/en.json` is the only strings file. There is no `strings.json`, because the two diverged in the reference. Icons go in `icons.json`. Hassfest requires `config.step` in `en.json` as soon as there's a config flow, even if it's empty. HA drops the trailing period of translated exception messages, so write them without one.
 - **Entities**: `_attr_has_entity_name = True`, `translation_key = key`, `unique_id = f"{address}_{key}"`, with the keys from plan §6. Since HA 2026.10, identifiers and connections are unique only within a config entry, so our device never merges with the old integration's: look devices up with `async_get_device_by_identifier(identifier, entry_id)`, not the deprecated `async_get_device`. Don't set a suggested area. If the device already has an area when its entities are created, HA puts the area in the entity_ids too (that's how the reference got `binary_sensor.taverna_pixel_led_display_connected`). Check the real entity_id in HA after adding an entity rather than deriving it from the name.
 - **Errors**: actions raise translated exceptions (`HomeAssistantError` or `ServiceValidationError` with `translation_domain=DOMAIN`), with the keys from plan §10. A failed action must show in the UI and fail the automation, not only end up in the log.
 - **Logging**: `debug` for traffic, `warning` for unexpected disconnects and failed restores. Don't log every command at `info`.
@@ -44,7 +44,9 @@ docker run --rm --platform linux/amd64 -v "$PWD":/github/workspace ghcr.io/home-
 - `pyproject.toml` only holds development tools: the integration isn't a Python package, and HA installs its requirements from `manifest.json`.
 - `pytest-homeassistant-custom-component==0.13.371` pins `homeassistant==2026.10.0`, the minimum supported version. It doesn't install the requirements of HA's own integrations. We depend on `bluetooth_adapters`, which pulls in `bluetooth` and `usb`, so `aiousbwatcher`, `dbus-fast` and `serialx` are listed explicitly, with the versions from the HA manifests. Update them when you bump the pin.
 - `tests/conftest.py` enables custom integrations and mocks the Bluetooth stack (`enable_bluetooth`) in every test. Pytest runs with `asyncio_mode = auto`.
-- The `mock_panel` fixture (`tests/common.py`) puts a simulated panel in range: it patches `establish_connection`, `async_ble_device_from_address`, `async_address_present` and `async_discovered_service_info` where our modules import them, and answers like the real panel (info frame to `set_time`, ACK to the rest, sent before the write returns). Change its `responder`, `info_frame`, `present` or `*_error` attributes to simulate failures.
+- The `mock_panel` fixture (`tests/common.py`) puts a simulated panel in range: it patches `establish_connection`, `async_ble_device_from_address`, `async_address_present`, `async_register_advertisement_callback`, `async_track_unavailable` and `async_discovered_service_info` where our modules import them. It answers like the real panel (info frame to `set_time`, ACK to the rest, sent before the write returns) and tracks `screen_on` (brightness and orientation turn it on, check V1). `commands` names what was written (`["set_time", "orientation 0", "power on"]`). Change its `responder`, `info_frame`, `present` or `*_error` attributes to simulate failures.
+- `present` stands for HA's Bluetooth history. `advertise()` calls the advertisement callbacks *before* setting `present`, as HA does, so a test fails without the `sleep(0)`. `vanish()` fires the unavailable callbacks, `lose_power()` drops the connection and makes connecting fail, `power_on()` boots the screen on and advertises.
+- `Store.async_delay_save` compares the real loop time with its next write time: after several saves in a row, `async_fire_time_changed` only reschedules the write. Test the delayed save with a single change, and several changes through a reload (unloading saves at once).
 - The first connection runs as a background task: wait for it with `hass.async_block_till_done(wait_background_tasks=True)`. Freeze time with `@pytest.mark.freeze_time`, not `freezer.move_to` in the test body, when the test also uses `hass_client`: a token issued "in the future" gets a 401.
 - `tests/snapshots/` holds the syrupy snapshots. After a deliberate change, regenerate them with `uv run pytest --snapshot-update` and review the diff.
 - Ruff excludes `specs/`, because it would reformat the code blocks in the Markdown documents.
@@ -69,7 +71,10 @@ scripts/deploy.sh --no-restart
 - Logs: `home-assistant.log` in the config dir (`/config` in the container), or `docker logs <container>`, over SSH.
 - REST API: `http://<ha-host>:8123/api/`, with an admin token kept in a file outside the repository. **Never print it**: send it as `-H "Authorization: Bearer $(tr -d '[:space:]' < "$TOKEN_FILE")"`. Entity states, actions and config flows can all be checked this way (for example `GET /api/config/config_entries/flow_handlers`).
 - The user does the visual checks on the panel and the power cycles.
+- Debug logging without a restart: call `logger.set_level` with `{"custom_components.ipixel_color_se": "debug"}` through the REST API. It lasts until the next restart.
 - **Panel checks without the integration** (how V4 and V9 were done): with no integration connected to the panel, pipe a bleak script into the container, `ssh <host> 'docker exec -i <container> python3 -' < probe.py`. It talks to BlueZ directly through the host's local adapter. Log every notification with a timestamp, and leave the panel as you found it. For advertising, HA's bluetooth config entry diagnostics (`GET /api/diagnostics/config_entry/<id>`) give the `time` of the last advertisement per address.
+
+- The probe needs the local adapter to hear the panel. When only the ESPHome proxy does, go through the integration instead (for V6, a temporary build lowered the minimum of `Brightness` to 0).
 
 Debug logging, in HA's `configuration.yaml`:
 
@@ -135,9 +140,13 @@ The panel accepts a single BLE connection. While HA holds it, the phone app and 
 
 - The panel can't be asked whether the screen is on, nor its brightness: the device-info reply carries neither. HA can only show the last state it sent.
 - Any content sent to the panel (an image, a GIF, the clock) turns the screen back on.
+- Check V1 (2026-11-07): brightness and orientation turn the screen back on too, so they set `power` to on. In the restore the screen-off command goes last. `set_time` may do the same: check it with V7 in M3, before the nightly time sync.
+- Check V2 (2026-11-07): the panel keeps its brightness through a power cycle. Restoring it still covers changes made elsewhere, such as in the phone app.
+- Check V6 (2026-11-07): brightness 0 doesn't turn the screen off. It leaves a faint light that looks the same as 1, so `Brightness` starts at 1.
+- Check V8 (2026-11-07): orientation 0 is normal, 1 turns the content 90° counterclockwise (the top goes to the left), 2 turns it upside down, 3 turns it 90° clockwise. The visible content turns at once. The options are `normal`, `rotated_counterclockwise`, `upside_down` and `rotated_clockwise`; the Store keeps the number.
 - An HA restart leaves the screen as it was, because the panel keeps its power.
 - A power cycle boots the panel with the screen on, showing its built-in GIFs: the mode isn't restored.
-- Every disconnect seen so far was the panel losing power.
+- Every disconnect seen so far was the panel losing power, or the ESPHome proxy it was connected through dropping off the network.
 
 ### Advertising while connected
 
@@ -152,4 +161,6 @@ Check V4 (2026-11-07): the panel **stops advertising while it's connected**, and
 - Serialize `connect` with a lock and return early when already connected, so a background reconnect and a command can't open two connections.
 - pypixelcolor's own transport creates its own `BleakClient` from the address, bypassing HA's Bluetooth stack and its proxies. We only use pypixelcolor to build commands; the transport is ours.
 - Connect with `establish_connection(..., ble_device_callback=...)`, so retries use the freshest `BLEDevice` (the proxy may have changed). Enable notifications once per connection: the reference restarted them for every command, which costs round trips through a proxy.
-- On the user's HA the panel is reached both through a local USB adapter and through an ESPHome Bluetooth proxy.
+- When a connection drops, disconnect the dropped client too. Seen in M2 on the local adapter (bleak 3.0.2): bleak cleans up its watcher but keeps the client's D-Bus connection open, BlueZ restores that connection's `StartNotify` session on the next connection, and every frame then arrives once more for each dropped connection (twice, then three times). `client.disconnect()` on a dropped client skips the device and only closes the D-Bus connection.
+- On the user's HA the panel is reached both through a local USB adapter and through an ESPHome Bluetooth proxy. Which of the two hears it changes over time.
+- Through an ESPHome proxy with a weak WiFi link, ACKs take seconds and a write can time out after 30 s (`Timeout waiting for BluetoothGATTWriteResponse`): the command fails with `command_failed`, then the connection usually drops and the reconnection restores the panel. After an HA restart a proxy may also keep a stale API subscriber and stop delivering advertisements (`No scanner state received 10.0s after subscribing`) until it's power cycled.

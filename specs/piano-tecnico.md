@@ -107,6 +107,7 @@ class DisplayState:
 
 - **Connessione**: `async_ble_device_from_address(connectable=True)` seguito da `establish_connection(BleakClientWithServiceCache, …, ble_device_callback=…)`. Con `ble_device_callback`, i tentativi successivi usano il dispositivo più recente, per esempio se nel frattempo è cambiato il proxy. Dopo la connessione si attivano le notifiche **una volta sola**.
 - **Un solo gestore delle notifiche** smista ogni frame verso l'operazione in corso: un evento di ACK oppure un future di risposta. Il riferimento invece fermava e riavviava le notifiche a ogni comando, il che costa più passaggi di rete attraverso i proxy.
+- **Quando la connessione cade, il client caduto viene chiuso** con `disconnect()`. Visto in M2 sull'adattatore locale: bleak tiene aperta la connessione D-Bus del client caduto, BlueZ ne ripristina la sessione di notifica alla connessione successiva, e ogni frame arriva una volta in più per ogni connessione caduta. Chiudere il client elimina la sessione.
 - **`async_send(plan)`**: sotto un `asyncio.Lock`, che serve le richieste in ordine di arrivo (F3.1, F8.10).
   - Per ogni finestra del plan scrive blocchi da 244 byte (`response=True`).
   - Se la policy del plan lo richiede, attende l'ACK `05 00 xx xx <status>`: `0` o `1` per la finestra, `3` per la fine. Il timeout è di 8 s.
@@ -119,15 +120,16 @@ class DisplayState:
 
 | Evento | Azione |
 |---|---|
-| Advertisement ricevuto (`async_register_advertisement_callback`) | `reachable = True`, aggiorna l'RSSI (al massimo una scrittura ogni 30 s, oppure se varia di almeno 3 dBm). Se non è connesso, `auto_reconnect` è attivo, non è in pausa e non c'è un tentativo in corso, avvia la riconnessione in background. |
+| Advertisement ricevuto (`async_register_advertisement_callback`) | Solo se connettibile: `reachable = True`, aggiorna l'RSSI (al massimo una scrittura ogni 30 s, oppure se varia di almeno 3 dBm). Se non è connesso, `auto_reconnect` è attivo, non è in pausa e non c'è un tentativo in corso, avvia la riconnessione in background. |
 | `async_track_unavailable` | `reachable = False` |
-| Tentativo fallito | Pausa di 30 s (F3.3) |
+| Disconnessione, voluta o no | `reachable = async_address_present(…)`: mentre era connesso il pannello non trasmetteva (V4), quindi il manager Bluetooth può averlo già dimenticato |
+| Tentativo fallito, in background o da un comando | Pausa di 30 s (F3.3) per i soli tentativi in background: un comando si connette comunque |
 | Comando dall'utente a pannello disconnesso | Connessione su richiesta (F3.4). Se fallisce, errore `not_reachable` |
 | `Auto reconnect` riattivato | Se il pannello è presente, tentativo immediato (F3.5) |
 | `Disconnect` | `auto_reconnect = False` (salvato), poi disconnessione voluta (F3.6) |
 | Avvio dell'entry | Nessuna connessione bloccante (risolve P5): se `auto_reconnect` è attivo e il pannello è presente, primo tentativo esplicito in background |
 
-La disponibilità delle entità di controllo è `connected or reachable` (T1). `Connected` e le entità di configurazione sono sempre disponibili.
+La disponibilità delle entità di controllo è `connected or reachable` (T1): mentre è connesso conta solo la connessione, perché il manager Bluetooth prima o poi dimentica un pannello che non trasmette (V4). `Connected` e le entità di configurazione e diagnostica sono sempre disponibili: la regola si basa sulla categoria dell'entità.
 
 ### 4.3 Ripristino (F9)
 
@@ -139,7 +141,11 @@ A **ogni** connessione riuscita, compresa la prima dopo l'avvio di HA, il contro
 4. se `power` è falso, invia lo spegnimento e si ferma;
 5. altrimenti rimostra il contenuto: `Clock` invia il comando orologio (che riaccende lo schermo); `Image` riscarica l'immagine e, se non è più raggiungibile, mostra l'orologio e porta `mode` su `Clock` (F9.4); se `mode` è `None` invia l'accensione.
 
+L'ordine conta: orientamento e luminosità riaccendono lo schermo (V1), quindi lo spegnimento deve arrivare dopo. In M2 `mode` non esiste ancora, quindi il passo 5 si riduce all'accensione.
+
 Il ripristino riapplica sempre lo stato completo, anche dopo un semplice riavvio di HA. È voluto: HA non può sapere se nel frattempo il pannello ha perso la corrente. Dopo l'avvio di HA il passo 5 aspetta che HA abbia terminato l'avvio (`async_at_started`), perché le sorgenti multimediali siano pronte.
+
+Se il ripristino fallisce (un ACK mancante con la connessione ancora aperta), il controller lo registra con un warning e lo ripete prima del comando successivo: un comando non arriva mai a un pannello che non è stato ripristinato.
 
 ---
 
@@ -156,7 +162,7 @@ Il ripristino riapplica sempre lo stato completo, anche dopo un semplice riavvio
 - `Image fit` rimanda l'immagine solo se `mode == Image`;
 - `Orientation` si invia sempre (F11.2).
 
-**Regola dello stato di accensione (F5.3)**: ogni invio di contenuto riuscito imposta `power = True`.
+**Regola dello stato di accensione (F5.3, F5.4)**: ogni invio riuscito di contenuto, di luminosità o di orientamento imposta `power = True`, perché tutti riaccendono lo schermo (V1).
 
 **`Mode`**:
 - `Clock`: comando orologio seguito da `set_time`;
@@ -191,14 +197,14 @@ Tutti i testi stanno in `translations/en.json`, che è l'unico file di testi: ni
 | key | Piattaforma | Categoria | Note |
 |---|---|---|---|
 | `power` | switch | — | `controller.state.power` |
-| `brightness` | number | — | Slider 1–100 (minimo da confermare con V6). Stato `None` → unknown |
+| `brightness` | number | — | Slider 1–100 %: lo 0 non spegne lo schermo e dà la stessa luce minima dell'1 (V6). Stato `None` → unknown |
 | `mode` | select | — | Opzioni `clock` e `image`, tradotte in "Clock" / "Image" |
 | `image_player` | media_player | — | PLAY_MEDIA, PLAY, STOP, BROWSE_MEDIA |
 | `clock_style` | select | config | Opzioni `style_1`…`style_9` → 0…8 |
 | `clock_24h` | switch | config | Nome "Clock 24-hour format" |
 | `clock_show_date` | switch | config | |
 | `image_fit` | select | config | `fill` → crop, `fit` → fit |
-| `orientation` | select | config | Inizialmente le opzioni sono `orientation_0`…`orientation_3`. Dopo V8 vengono rinominate (es. `normal`, `upside_down`). Nello Store il valore resta un intero. |
+| `orientation` | select | config | Opzioni `normal`, `rotated_counterclockwise`, `upside_down`, `rotated_clockwise` per i valori 0–3 (V8), tradotte in "Normal", "Rotated 90° counterclockwise", "Upside down", "Rotated 90° clockwise". Nello Store il valore resta un intero. |
 | `auto_reconnect` | switch | config | |
 | `sync_time` | button | config | |
 | `disconnect` | button | config | |
@@ -280,7 +286,8 @@ I log usano `debug` per il traffico e `warning` per le disconnessioni inattese e
 |---|---|
 | `test_protocol.py` | Byte di ogni comando. Data dell'orologio passata come `DD/MM/YY` (pypixelcolor accetta solo l'anno a due cifre, e il giorno della settimana resta corretto perché 2000 anni sono cicli gregoriani completi). Decodifica delle informazioni del pannello. |
 | `test_connection.py` | Con un `BleakClient` finto: blocchi da 244 byte, attesa degli ACK, timeout → errore, risposta catturata, ordine del lock, disconnessione inattesa |
-| `test_controller.py` | Regole di accensione. Invio immediato condizionato a `Mode` (D10). Ordine del ripristino. Pausa dopo un tentativo fallito. `Disconnect` che spegne `Auto reconnect`. Connessione su richiesta. Ripiego sull'orologio. Ora di HA in Europe/Rome con sistema in UTC. |
+| `test_controller.py` | Regole di accensione. Invio immediato condizionato a `Mode` (D10). Ordine del ripristino e ripristino fallito ripetuto prima del comando successivo. Riconnessione al primo advertisement (`sleep(0)`). Pausa dopo un tentativo fallito. `Disconnect` che spegne `Auto reconnect`. Connessione su richiesta. Disponibilità con V4. Ripiego sull'orologio. Ora di HA in Europe/Rome con sistema in UTC. |
+| `test_state.py` | Default, (de)serializzazione completa, valori mancanti o non validi che tornano al default |
 | `test_config_flow.py` | Discovery e conferma del nome, elenco filtrato, inserimento manuale, `cannot_connect`, `already_configured` |
 | `test_init.py` | Avvio senza pannello presente (entry caricata, entità non disponibili), scaricamento dell'entry |
 | `test_entities.py` | entity_id con il prefisso, categorie, disponibilità, chiamate alle azioni |
@@ -347,6 +354,10 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 |---|---|---|
 | **V9** | 2026-11-07 | Luminosità, orientamento, accensione, spegnimento e orologio ricevono l'ACK `05 00 <id> <tipo> 01`, che ripete i byte 2–3 del comando. `set_time` riceve invece il frame delle informazioni `0c 00 01 80 <tipo> …`: il `set_time` di pypixelcolor, che attende un ACK, andrebbe sempre in timeout. Il pannello di prova è di tipo `0x81`, cioè 32×32. |
 | **V4** | 2026-11-07 | Da connesso il pannello **smette** di trasmettere advertising, e riprende subito, più volte al secondo, appena la connessione si chiude. `Signal strength` si aggiorna quindi solo a pannello disconnesso. In M2 la raggiungibilità calcolata dagli advertising va ignorata mentre il pannello è connesso, perché il manager Bluetooth di HA prima o poi lo considera non disponibile. |
+| **V8** | 2026-11-07 | I quattro valori ruotano il contenuto: 0 normale, 1 di 90° in senso antiorario (il lato in alto va a sinistra), 2 di 180°, 3 di 90° in senso orario. Il contenuto visibile ruota subito, senza essere ridisegnato. Le opzioni sono state rinominate di conseguenza (§6). |
+| **V1** | 2026-11-07 | A schermo spento, un comando di luminosità **riaccende** lo schermo. Lo fa anche l'orientamento. Entrambi portano quindi `power` su vero (§5), e nel ripristino lo spegnimento va per ultimo (§4.3). Da verificare con V7 in M3: anche `set_time` potrebbe riaccendere lo schermo, e la sincronizzazione notturna non deve farlo. |
+| **V2** | 2026-11-07 | La luminosità **resta** dopo un'interruzione di corrente: con `Disconnect` attivo, il pannello è ripartito con le GIF predefinite già attenuate, e il ripristino successivo non ha cambiato nulla. Il ripristino della luminosità resta utile per i cambi fatti da altre parti, per esempio dall'app. |
+| **V6** | 2026-11-07 | La luminosità 0 non spegne lo schermo: lascia una luce minima, a occhio uguale a quella di 1. Il minimo di `Brightness` resta 1. |
 
 ---
 
@@ -359,4 +370,6 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 | Il pannello non trasmette advertising da connesso (V4) | `Signal strength` fermo durante la connessione | Confermato in M1. Si accetta e si documenta (il sensore è disattivato di default) |
 | Ripristino a ogni avvio di HA | Una GIF viene ritrasmessa a ogni riavvio, qualche secondo di trasferimento | Accettato: garantisce la coerenza (F9) |
 | URL esterni non più raggiungibili al ripristino | L'immagine non torna | Ripiego sull'orologio (F9.4), già deciso |
+| ACK duplicati o in ritardo (visti in M2 con i client caduti non chiusi, ora risolto) | Nei trasferimenti a finestre di M4, un ACK in più potrebbe far partire la finestra successiva troppo presto | In M4 valutare di accettare solo gli ACK che ripetono i byte 2–3 del comando (V9) |
+| Proxy ESPHome con WiFi instabile (visto in M2) | ACK lenti, scritture in timeout dopo 30 s, connessione che cade | L'errore compare nell'interfaccia (`command_failed`). Alla caduta della connessione segue la riconnessione con il ripristino, che riallinea il pannello allo stato di HA. |
 | Pannello e HA in competizione con l'app del telefono | Connessioni rubate | `Disconnect` spegne `Auto reconnect` (F3.6) |
