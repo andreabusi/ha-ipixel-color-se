@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | **Stato** | Bozza 0.1 |
-| **Data** | 2026-11-07 |
-| **Input** | [specifica-funzionale.md](specifica-funzionale.md) v1.0 (i riferimenti F*n*, T*n*, V*n* rimandano lì) |
+| **Data** | 2026-11-08 |
+| **Input** | [specifica-funzionale.md](specifica-funzionale.md) v1.1 (i riferimenti F*n*, T*n*, V*n* rimandano lì) |
 | **Dominio** | `ipixel_color_se` |
 | **Repository** | https://github.com/andreabusi/ha-ipixel-color-se (codeowner `@andreabusi`) |
 
@@ -35,6 +35,7 @@ Valori letti dal codice sorgente di HA al tag `2026.10.0` e dal pacchetto pypixe
 | Python richiesto da HA 2026.10 | 3.14 | Ambiente di sviluppo e CI su Python 3.14 |
 | Bleak / bleak-retry-connector / habluetooth | 3.0.2 / 4.7.1 / 7.1.2, forniti da HA | Non vanno elencati nei `requirements` del manifest |
 | pypixelcolor | 0.5.0, licenza MIT, dipende da `bleak`, `crccheck`, `pillow` senza versioni fissate | Nel manifest solo `pypixelcolor==0.5.0`: pin esatto, perché usiamo moduli interni |
+| `set_clock_mode` di pypixelcolor | Accetta gli stili 0–8 | Il pannello mostra gli stili 1–9 e ignora lo 0 (V5): usiamo 1–8. Il 9 arriverà con una PR a pypixelcolor e un aggiornamento del pin. |
 | Trasporto di pypixelcolor | Crea un proprio `BleakClient` dall'indirizzo | Non passa dai proxy di HA: usiamo pypixelcolor solo per costruire i comandi, il trasporto è nostro |
 | `async_register_advertisement_callback` | Esiste. Riceve ogni pacchetto, una volta per ogni scanner che lo sente, prima che HA lo registri | Non fa replay all'avvio: il primo tentativo di connessione va fatto esplicitamente. Ha bisogno di un `await asyncio.sleep(0)` prima di connettersi, come nel riferimento. Gli aggiornamenti dell'RSSI vanno limitati. |
 | `async_track_unavailable`, `async_address_present` | Disponibili | Calcolo della raggiungibilità (T1) |
@@ -89,7 +90,7 @@ class DisplayState:
     brightness: int | None = None        # None = mai impostata: non si invia
     orientation: int = 0
     mode: Mode | None = None             # None = sconosciuta: non si ripristina il contenuto
-    clock: ClockSettings = ClockSettings(style=0, format_24h=True, show_date=True)
+    clock: ClockSettings = ClockSettings(style=1, format_24h=True, show_date=True)  # stili 1–8 (V5)
     image_fit: ImageFit = ImageFit.FILL
     image: ImageRef | None = None        # media_id originale + titolo, non l'URL firmato
     auto_reconnect: bool = True
@@ -135,15 +136,15 @@ La disponibilità delle entità di controllo è `connected or reachable` (T1): m
 
 A **ogni** connessione riuscita, compresa la prima dopo l'avvio di HA, il controller esegue sotto il proprio lock di operazione:
 
-1. `set_time(now)` con l'ora di HA;
+1. `set_time(now)` con l'ora di HA: senza corrente il pannello perde ora e data (V3);
 2. `orientation`;
 3. `brightness`, se impostata;
 4. se `power` è falso, invia lo spegnimento e si ferma;
-5. altrimenti rimostra il contenuto: `Clock` invia il comando orologio (che riaccende lo schermo); `Image` riscarica l'immagine e, se non è più raggiungibile, mostra l'orologio e porta `mode` su `Clock` (F9.4); se `mode` è `None` invia l'accensione.
+5. altrimenti rimostra il contenuto: `Clock` invia il comando orologio, che riaccende lo schermo e rimette la data; `Image` riscarica l'immagine e, se non è più raggiungibile, mostra l'orologio e porta `mode` su `Clock` (F9.4); se `mode` è `None` invia l'accensione.
 
-L'ordine conta: orientamento e luminosità riaccendono lo schermo (V1), quindi lo spegnimento deve arrivare dopo. In M2 `mode` non esiste ancora, quindi il passo 5 si riduce all'accensione.
+L'ordine conta: `set_time`, orientamento e luminosità riaccendono lo schermo (V1, V7), quindi lo spegnimento deve arrivare dopo. Con lo schermo spento il pannello resta senza data finché non viene riacceso: la riaccensione manda `set_time` e l'orologio (§5). In M3 il passo 5 copre `Clock` e `None`; `Image` arriva in M4.
 
-Il ripristino riapplica sempre lo stato completo, anche dopo un semplice riavvio di HA. È voluto: HA non può sapere se nel frattempo il pannello ha perso la corrente. Dopo l'avvio di HA il passo 5 aspetta che HA abbia terminato l'avvio (`async_at_started`), perché le sorgenti multimediali siano pronte.
+Il ripristino riapplica sempre lo stato completo, anche dopo un semplice riavvio di HA. È voluto: HA non può sapere se nel frattempo il pannello ha perso la corrente. Da M4, dopo l'avvio di HA il passo 5 aspetterà che HA abbia terminato l'avvio (`async_at_started`), perché le sorgenti multimediali siano pronte.
 
 Se il ripristino fallisce (un ACK mancante con la connessione ancora aperta), il controller lo registra con un warning e lo ripete prima del comando successivo: un comando non arriva mai a un pannello che non è stato ripristinato.
 
@@ -157,12 +158,16 @@ Se il ripristino fallisce (un ACK mancante con la connessione ancora aperta), il
 3. se l'invio riesce, aggiorna lo stato, salva e avvisa le entità;
 4. se fallisce, solleva un errore tradotto (T2) e lo stato non cambia.
 
+**`Power`**: lo spegnimento invia il comando di spegnimento. L'accensione rimostra il contenuto: con `mode == Clock` invia `set_time` e il comando orologio, così il pannello riceve l'ora, la data e le opzioni cambiate a schermo spento; altrimenti invia l'accensione.
+
+**Risveglio dell'orologio**: luminosità e orientamento riaccendono lo schermo (V1) con l'orologio che il pannello aveva, magari con ora, data o opzioni vecchie. Se lo schermo era spento e `mode == Clock`, dopo il comando il controller invia anche `set_time` e il comando orologio.
+
 **Regola dell'invio immediato (F6.3, D10)**:
-- una modifica a `ClockSettings` aggiorna sempre lo stato, ma invia il comando orologio solo se `mode == Clock` e `power` è vero;
+- una modifica a `ClockSettings` aggiorna e salva sempre lo stato, ma invia il comando orologio solo se `mode == Clock`, `power` è vero e il pannello è connesso. Non apre una connessione: a pannello non raggiungibile l'opzione resta salvata e la applica il ripristino alla connessione successiva. Se l'invio fallisce compare l'errore, l'opzione resta salvata e il ripristino viene ripetuto prima del comando successivo;
 - `Image fit` rimanda l'immagine solo se `mode == Image`;
 - `Orientation` si invia sempre (F11.2).
 
-**Regola dello stato di accensione (F5.3, F5.4)**: ogni invio riuscito di contenuto, di luminosità o di orientamento imposta `power = True`, perché tutti riaccendono lo schermo (V1).
+**Regola dello stato di accensione (F5.3, F5.4)**: ogni invio riuscito di contenuto, di luminosità, di orientamento o di `set_time` imposta `power = True`, perché tutti riaccendono lo schermo (V1, V7).
 
 **`Mode`**:
 - `Clock`: comando orologio seguito da `set_time`;
@@ -177,9 +182,13 @@ Se il ripristino fallisce (un ACK mancante con la connessione ancora aperta), il
 Stop corrisponde a `Mode = Clock`. Lo stato del player si deriva dal controller: playing se `mode == Image` e lo schermo è acceso, buffering durante un trasferimento, altrimenti idle.
 
 **Sincronizzazione dell'ora (F6.5, F6.6)**:
-- `async_track_time_change` alle 00:00:05 sincronizza l'ora e, se l'orologio è visibile, rimanda il comando orologio con la nuova data;
+- `async_track_time_change` alle 00:00:05 sincronizza l'ora e, se `mode == Clock`, rimanda il comando orologio con la nuova data. Il pannello fa avanzare la data da solo (V3), quindi è solo una garanzia;
 - alle 03:05:00 sincronizza di nuovo, per coprire i cambi di ora legale europei;
-- entrambe agiscono solo se c'è connessione: con `Auto reconnect` disattivo non riaprono la connessione.
+- entrambe agiscono solo se c'è connessione: con `Auto reconnect` disattivo non riaprono la connessione;
+- entrambe saltano uno schermo spento, perché `set_time` lo riaccenderebbe (V7): ora e data arrivano alla riaccensione;
+- un errore finisce solo nel log, con un warning, perché nessuna azione dell'utente è in corso.
+
+**`Sync time`** (F6.7): connette se necessario, invia `set_time` e, se `mode == Clock`, il comando orologio con la data di oggi. Porta `power` su vero, perché `set_time` riaccende lo schermo (V7).
 
 L'ora viene sempre da `homeassistant.util.dt.now()` (F6.4).
 
@@ -198,9 +207,9 @@ Tutti i testi stanno in `translations/en.json`, che è l'unico file di testi: ni
 |---|---|---|---|
 | `power` | switch | — | `controller.state.power` |
 | `brightness` | number | — | Slider 1–100 %: lo 0 non spegne lo schermo e dà la stessa luce minima dell'1 (V6). Stato `None` → unknown |
-| `mode` | select | — | Opzioni `clock` e `image`, tradotte in "Clock" / "Image" |
+| `mode` | select | — | Opzioni `clock` e `image` (da M4), tradotte in "Clock" / "Image". Stato `None` → unknown (F7.4) |
 | `image_player` | media_player | — | PLAY_MEDIA, PLAY, STOP, BROWSE_MEDIA |
-| `clock_style` | select | config | Opzioni `style_1`…`style_9` → 0…8 |
+| `clock_style` | select | config | Opzioni `planet_yellow`, `planet_gradient`, `planet_blue`, `frame_gradient`, `frame_yellow`, `frame_multicolor`, `hourglass_yellow`, `hourglass_orange` per i valori 1–8, dal disegno della schermata dell'ora su un 32×32 (V5). Tradotte in "Planet, yellow" … "Hourglass, orange". Nello Store il valore resta un intero. |
 | `clock_24h` | switch | config | Nome "Clock 24-hour format" |
 | `clock_show_date` | switch | config | |
 | `image_fit` | select | config | `fill` → crop, `fit` → fit |
@@ -286,7 +295,7 @@ I log usano `debug` per il traffico e `warning` per le disconnessioni inattese e
 |---|---|
 | `test_protocol.py` | Byte di ogni comando. Data dell'orologio passata come `DD/MM/YY` (pypixelcolor accetta solo l'anno a due cifre, e il giorno della settimana resta corretto perché 2000 anni sono cicli gregoriani completi). Decodifica delle informazioni del pannello. |
 | `test_connection.py` | Con un `BleakClient` finto: blocchi da 244 byte, attesa degli ACK, timeout → errore, risposta catturata, ordine del lock, disconnessione inattesa |
-| `test_controller.py` | Regole di accensione. Invio immediato condizionato a `Mode` (D10). Ordine del ripristino e ripristino fallito ripetuto prima del comando successivo. Riconnessione al primo advertisement (`sleep(0)`). Pausa dopo un tentativo fallito. `Disconnect` che spegne `Auto reconnect`. Connessione su richiesta. Disponibilità con V4. Ripiego sull'orologio. Ora di HA in Europe/Rome con sistema in UTC. |
+| `test_controller.py` | Regole di accensione. Invio immediato condizionato a `Mode` (D10). Ordine del ripristino e ripristino fallito ripetuto prima del comando successivo. Riconnessione al primo advertisement (`sleep(0)`). Pausa dopo un tentativo fallito. `Disconnect` che spegne `Auto reconnect`. Connessione su richiesta. Disponibilità con V4. Ripiego sull'orologio. Ora di HA in Europe/Rome con sistema in UTC. Sincronizzazioni pianificate: mezzanotte, ora legale, schermo spento, nessuna riconnessione. |
 | `test_state.py` | Default, (de)serializzazione completa, valori mancanti o non validi che tornano al default |
 | `test_config_flow.py` | Discovery e conferma del nome, elenco filtrato, inserimento manuale, `cannot_connect`, `already_configured` |
 | `test_init.py` | Avvio senza pannello presente (entry caricata, entità non disponibili), scaricamento dell'entry |
@@ -355,9 +364,12 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 | **V9** | 2026-11-07 | Luminosità, orientamento, accensione, spegnimento e orologio ricevono l'ACK `05 00 <id> <tipo> 01`, che ripete i byte 2–3 del comando. `set_time` riceve invece il frame delle informazioni `0c 00 01 80 <tipo> …`: il `set_time` di pypixelcolor, che attende un ACK, andrebbe sempre in timeout. Il pannello di prova è di tipo `0x81`, cioè 32×32. |
 | **V4** | 2026-11-07 | Da connesso il pannello **smette** di trasmettere advertising, e riprende subito, più volte al secondo, appena la connessione si chiude. `Signal strength` si aggiorna quindi solo a pannello disconnesso. In M2 la raggiungibilità calcolata dagli advertising va ignorata mentre il pannello è connesso, perché il manager Bluetooth di HA prima o poi lo considera non disponibile. |
 | **V8** | 2026-11-07 | I quattro valori ruotano il contenuto: 0 normale, 1 di 90° in senso antiorario (il lato in alto va a sinistra), 2 di 180°, 3 di 90° in senso orario. Il contenuto visibile ruota subito, senza essere ridisegnato. Le opzioni sono state rinominate di conseguenza (§6). |
-| **V1** | 2026-11-07 | A schermo spento, un comando di luminosità **riaccende** lo schermo. Lo fa anche l'orientamento. Entrambi portano quindi `power` su vero (§5), e nel ripristino lo spegnimento va per ultimo (§4.3). Da verificare con V7 in M3: anche `set_time` potrebbe riaccendere lo schermo, e la sincronizzazione notturna non deve farlo. |
+| **V1** | 2026-11-07 | A schermo spento, un comando di luminosità **riaccende** lo schermo. Lo fa anche l'orientamento. Entrambi portano quindi `power` su vero (§5), e nel ripristino lo spegnimento va per ultimo (§4.3). V7 ha confermato che lo fa anche `set_time`. |
 | **V2** | 2026-11-07 | La luminosità **resta** dopo un'interruzione di corrente: con `Disconnect` attivo, il pannello è ripartito con le GIF predefinite già attenuate, e il ripristino successivo non ha cambiato nulla. Il ripristino della luminosità resta utile per i cambi fatti da altre parti, per esempio dall'app. |
 | **V6** | 2026-11-07 | La luminosità 0 non spegne lo schermo: lascia una luce minima, a occhio uguale a quella di 1. Il minimo di `Brightness` resta 1. |
+| **V5** | 2026-11-07 | Sul 32×32 gli stili validi sono i valori 1–9. Lo 0 riceve l'ACK con status 1 ma non mostra nulla (resta il contenuto precedente), il 10 riceve status 0. Tutti alternano due schermate: la data (giorno della settimana in rosa, mese.giorno in azzurro, circa 5 s) e l'ora (circa 10 s), che cambia per stile: 1–3 un pianeta con l'ora sopra e minuti.secondi sotto, in giallo, gradiente o blu; 4–6 una cornice tratteggiata gradiente, gialla o multicolore; 7–9 HH:MM sopra e una clessidra con i secondi sotto, con sabbia gialla, arancione o bianca. pypixelcolor accetta 0–8, quindi usiamo 1–8 con default 1 e i nomi del §6. |
+| **V7** | 2026-11-07 | `set_time` non provoca sfarfallii né fa comparire le GIF: fa ripartire il ciclo dalla schermata della data. A schermo spento **riaccende** lo schermo, mostrando l'orologio. Le sincronizzazioni pianificate saltano quindi uno schermo spento, e la riaccensione (anche da luminosità o orientamento) invia `set_time` e l'orologio (§5). |
+| **V3** | 2026-11-07 | A mezzanotte il pannello fa avanzare da solo data e giorno della settimana. Senza corrente perde invece ora e data: riparte da circa 08:00:00, e il byte 8 del frame delle informazioni, che è il mese, torna a 0 finché un comando orologio non rimette la data. I byte 5 e 6 sono i minuti e i secondi appena impostati. Il ripristino copre tutto: `set_time` al passo 1, l'orologio al passo 5. |
 
 ---
 

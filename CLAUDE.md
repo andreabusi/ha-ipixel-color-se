@@ -15,7 +15,7 @@ The design documents in `specs/` are written in Italian and are the source of tr
 
 Work one milestone at a time. Start a milestone only when the user asks, and don't implement anything that belongs to a later one. When a decision changes, update the spec or the plan.
 
-**Current state**: M2 (controller and basic commands). `DisplayState` saved in one `Store` per display, the controller with its operation lock, reconnection from advertisements, availability, connection on demand and the restore (plan §4.3, up to the screen on or off). Entities `Power`, `Brightness`, `Orientation`, `Auto reconnect` and `Disconnect`, besides M1's `Connected`, `Width` and `Height`. No `Mode`, clock or images yet: they arrive in M3 and M4. Update this line at the end of each milestone.
+**Current state**: M3 (clock). `Mode` with the `clock` option only, the clock options (`Clock style`, `Clock 24-hour format`, `Clock show date`) sent at once only while the clock is shown (D10), `Sync time`, the scheduled syncs at 00:00:05 and 03:05:00, and the clock in the restore (plan §4.3 step 5). Before that: M2's `Power`, `Brightness`, `Orientation`, `Auto reconnect`, `Disconnect`, the Store and the reconnection, and M1's `Connected`, `Width` and `Height`. No images, `Image player`, `Image fit` or `Signal strength` yet: they arrive in M4 and M5. Update this line at the end of each milestone.
 
 ## Conventions
 
@@ -44,10 +44,11 @@ docker run --rm --platform linux/amd64 -v "$PWD":/github/workspace ghcr.io/home-
 - `pyproject.toml` only holds development tools: the integration isn't a Python package, and HA installs its requirements from `manifest.json`.
 - `pytest-homeassistant-custom-component==0.13.371` pins `homeassistant==2026.10.0`, the minimum supported version. It doesn't install the requirements of HA's own integrations. We depend on `bluetooth_adapters`, which pulls in `bluetooth` and `usb`, so `aiousbwatcher`, `dbus-fast` and `serialx` are listed explicitly, with the versions from the HA manifests. Update them when you bump the pin.
 - `tests/conftest.py` enables custom integrations and mocks the Bluetooth stack (`enable_bluetooth`) in every test. Pytest runs with `asyncio_mode = auto`.
-- The `mock_panel` fixture (`tests/common.py`) puts a simulated panel in range: it patches `establish_connection`, `async_ble_device_from_address`, `async_address_present`, `async_register_advertisement_callback`, `async_track_unavailable` and `async_discovered_service_info` where our modules import them. It answers like the real panel (info frame to `set_time`, ACK to the rest, sent before the write returns) and tracks `screen_on` (brightness and orientation turn it on, check V1). `commands` names what was written (`["set_time", "orientation 0", "power on"]`). Change its `responder`, `info_frame`, `present` or `*_error` attributes to simulate failures.
+- The `mock_panel` fixture (`tests/common.py`) puts a simulated panel in range: it patches `establish_connection`, `async_ble_device_from_address`, `async_address_present`, `async_register_advertisement_callback`, `async_track_unavailable` and `async_discovered_service_info` where our modules import them. It answers like the real panel (info frame to `set_time`, ACK to the rest, sent before the write returns) and tracks `screen_on` (brightness, orientation, the clock and `set_time` turn it on, checks V1 and V7). `commands` names what was written (`["set_time", "orientation 0", "power on"]`, `"clock 3 12h date"`); `panel_time` and `panel_date` decode the time and date a command carries. Change its `responder`, `info_frame`, `present` or `*_error` attributes to simulate failures.
 - `present` stands for HA's Bluetooth history. `advertise()` calls the advertisement callbacks *before* setting `present`, as HA does, so a test fails without the `sleep(0)`. `vanish()` fires the unavailable callbacks, `lose_power()` drops the connection and makes connecting fail, `power_on()` boots the screen on and advertises.
 - `Store.async_delay_save` compares the real loop time with its next write time: after several saves in a row, `async_fire_time_changed` only reschedules the write. Test the delayed save with a single change, and several changes through a reload (unloading saves at once).
 - The first connection runs as a background task: wait for it with `hass.async_block_till_done(wait_background_tasks=True)`. Freeze time with `@pytest.mark.freeze_time`, not `freezer.move_to` in the test body, when the test also uses `hass_client`: a token issued "in the future" gets a 401.
+- Scheduled syncs are tested with `freezer.move_to` and `async_fire_time_changed`. With frozen time an asyncio timeout never expires, so simulate a failed command with `write_error`, not a missing ACK, or the test hangs. `uv run pytest --timeout 30` catches a hang.
 - `tests/snapshots/` holds the syrupy snapshots. After a deliberate change, regenerate them with `uv run pytest --snapshot-update` and review the diff.
 - Ruff excludes `specs/`, because it would reformat the code blocks in the Markdown documents.
 - The hassfest image is amd64 only: on Apple Silicon it runs emulated.
@@ -72,7 +73,7 @@ scripts/deploy.sh --no-restart
 - REST API: `http://<ha-host>:8123/api/`, with an admin token kept in a file outside the repository. **Never print it**: send it as `-H "Authorization: Bearer $(tr -d '[:space:]' < "$TOKEN_FILE")"`. Entity states, actions and config flows can all be checked this way (for example `GET /api/config/config_entries/flow_handlers`).
 - The user does the visual checks on the panel and the power cycles.
 - Debug logging without a restart: call `logger.set_level` with `{"custom_components.ipixel_color_se": "debug"}` through the REST API. It lasts until the next restart.
-- **Panel checks without the integration** (how V4 and V9 were done): with no integration connected to the panel, pipe a bleak script into the container, `ssh <host> 'docker exec -i <container> python3 -' < probe.py`. It talks to BlueZ directly through the host's local adapter. Log every notification with a timestamp, and leave the panel as you found it. For advertising, HA's bluetooth config entry diagnostics (`GET /api/diagnostics/config_entry/<id>`) give the `time` of the last advertisement per address.
+- **Panel checks without the integration** (how V3, V4, V5, V7 and V9 were done): with no integration connected to the panel, pipe a bleak script into the container, `ssh <host> 'docker exec -i <container> python3 -' < probe.py`. It talks to BlueZ directly through the host's local adapter. Log every notification with a timestamp, and leave the panel as you found it. For advertising, HA's bluetooth config entry diagnostics (`GET /api/diagnostics/config_entry/<id>`) give the `time` of the last advertisement per address.
 
 - The probe needs the local adapter to hear the panel. When only the ESPHome proxy does, go through the integration instead (for V6, a temporary build lowered the minimum of `Brightness` to 0).
 
@@ -127,25 +128,32 @@ The panel accepts a single BLE connection. While HA holds it, the phone app and 
 - Advertising: local name `LED_BLE_*` and manufacturer data for company 21076 (`0x5254`), but **no service UUID**. The manifest's second matcher, `service_uuid: 0000fa01-…` (kept from the reference), never matches this panel: only the name does.
 - GATT: service `000000fa-0000-1000-8000-00805f9b34fb`, with write characteristic `0000fa02-…` (write and write without response) and notify characteristic `0000fa03-…`. The panel also has a `0000ae00-…` service (`ae01` write, `ae02` notify) that nobody uses.
 - Commands are framed as `[length LE16][opcode LE16][payload]`, where the length includes the 4 header bytes. Brightness, for example, is opcode `0x8004` with a 1–100 byte, and power is `05 00 07 01 <0|1>`.
-- pypixelcolor's clock command only takes a two-digit year (`DD/MM/YY`). The weekday stays right because 2000 years are whole Gregorian cycles.
+- The clock is `0b 00 06 01 <style> <24h> <date> <yy> <mm> <dd> <isoweekday>`, and `set_time` is `08 00 01 80 <hh> <mm> <ss> 00`. pypixelcolor's clock command only takes a two-digit year (`DD/MM/YY`). The weekday stays right because 2000 years are whole Gregorian cycles.
 
 ### Transfers and ACKs
 
 - Each window of a transfer is written in 244-byte chunks. On the local BlueZ adapter a single write can't exceed 512 bytes.
 - After each window the panel answers `05 00 xx xx <status>`: status `0` or `1` means the window was received, `3` means the transfer is done. Wait up to 8 s for it before sending the next window.
 - Check V9 (2026-11-07): every simple command (brightness, orientation, power on and off, clock mode) gets an ACK `05 00 <id> <type> 01`, echoing bytes 2–3 of the command, in about 30 ms. The ACK can arrive **before the write itself returns**, so the wait must be armed before writing.
-- **`set_time` gets no ACK**: the panel answers with its info frame `0c 00 01 80 <type> …`, because it's the same command as pypixelcolor's `get_device_info`. pypixelcolor's own `set_time` plan waits for an ACK and would always time out after 8 s: in `protocol.py` it's a request with a response instead. Byte 4 is the panel type: `0x81` means 32×32.
+- **`set_time` gets no ACK**: the panel answers with its info frame `0c 00 01 80 <type> …`, because it's the same command as pypixelcolor's `get_device_info`. pypixelcolor's own `set_time` plan waits for an ACK and would always time out after 8 s: in `protocol.py` it's a request with a response instead. Byte 4 is the panel type: `0x81` means 32×32. Bytes 5 and 6 are the minute and second just set, and byte 8 is the month, which only a clock command sets (check V3).
 
 ### Power state
 
 - The panel can't be asked whether the screen is on, nor its brightness: the device-info reply carries neither. HA can only show the last state it sent.
 - Any content sent to the panel (an image, a GIF, the clock) turns the screen back on.
-- Check V1 (2026-11-07): brightness and orientation turn the screen back on too, so they set `power` to on. In the restore the screen-off command goes last. `set_time` may do the same: check it with V7 in M3, before the nightly time sync.
+- Check V1 (2026-11-07): brightness and orientation turn the screen back on too, so they set `power` to on. In the restore the screen-off command goes last. With the clock as content, waking the screen this way also sends `set_time` and the clock, because the panel shows the clock it had, maybe stale.
+- Check V7 (2026-11-07): `set_time` turns the screen back on too, showing the clock. It doesn't flicker or bring the GIFs back: it restarts the clock's cycle at the date screen. So the scheduled syncs skip a screen that's off, turning the screen on sends `set_time` and the clock, and `Sync time` sets `power` to on.
 - Check V2 (2026-11-07): the panel keeps its brightness through a power cycle. Restoring it still covers changes made elsewhere, such as in the phone app.
 - Check V6 (2026-11-07): brightness 0 doesn't turn the screen off. It leaves a faint light that looks the same as 1, so `Brightness` starts at 1.
 - Check V8 (2026-11-07): orientation 0 is normal, 1 turns the content 90° counterclockwise (the top goes to the left), 2 turns it upside down, 3 turns it 90° clockwise. The visible content turns at once. The options are `normal`, `rotated_counterclockwise`, `upside_down` and `rotated_clockwise`; the Store keeps the number.
 - An HA restart leaves the screen as it was, because the panel keeps its power.
 - A power cycle boots the panel with the screen on, showing its built-in GIFs: the mode isn't restored.
+- Check V3 (2026-11-07): the panel loses its time and date without power, and boots at about 08:00:00. The restore's `set_time` and clock put both back. With power, it advances the date and weekday by itself at midnight.
+
+### Clock
+
+- Check V5 (2026-11-07), on the 32×32 panel: the clock styles are the values 1 to 9. 0 gets an ACK with status 1 but shows nothing (the panel keeps the previous content), and 10 gets status 0. pypixelcolor accepts 0 to 8, so we offer 1 to 8, default 1. The ninth (an hourglass with white sand) waits for a pypixelcolor PR.
+- Every style alternates a date screen (weekday in pink over month.day in light blue, about 5 s) with a time screen (about 10 s). The time screen names the options: 1–3 a planet with a ring, the hour above and minute.second below, in yellow, gradient or blue; 4–6 a dashed 1-pixel frame in gradient, yellow or one color per side; 7–8 HH:MM above an hourglass and the seconds, with yellow or orange sand. Other models may draw them differently.
 - Every disconnect seen so far was the panel losing power, or the ESPHome proxy it was connected through dropping off the network.
 
 ### Advertising while connected

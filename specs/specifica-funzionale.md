@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **Stato** | Versione 1.0: decisioni chiuse, pronta per il piano tecnico. Le prove sul pannello (§10) si fanno all'inizio dell'implementazione. |
-| **Data** | 2026-11-07 |
+| **Stato** | Versione 1.1: decisioni chiuse, pronta per il piano tecnico. Le prove sul pannello (§10) si fanno all'inizio dell'implementazione. La 1.1 recepisce gli esiti di V5 e V7 (F6.2, F6.5, F6.7). |
+| **Data** | 2026-11-08 |
 | **Dominio** | `ipixel_color_se` |
 | **Riferimento** | `ha-ipixel-color`, branch `import-server-version` (commit `a93b813` + modifiche non committate: riconnessione in background, stato di accensione) |
 | **Libreria protocollo** | `pypixelcolor` 0.5.0 |
@@ -200,14 +200,14 @@ Si mantengono due entità separate, entrambe in Controls:
 
 - **F6.1** L'utente mostra l'orologio scegliendo `Clock` in `Mode` (§5.7).
 - **F6.2** Le opzioni dell'orologio stanno in Configuration:
-  - **`Clock style`**: 9 stili, con nomi leggibili ("Style 1" … "Style 9", oppure nomi descrittivi dopo [V5]);
+  - **`Clock style`**: gli stili del pannello, con nomi descrittivi ricavati da [V5]. Sono 8: il pannello ne ha un nono, che arriverà quando pypixelcolor lo accetterà;
   - **`Clock 24-hour format`**: acceso o spento;
   - **`Clock show date`**: acceso o spento.
 - **F6.3** **Regola generale: ogni modifica viene inviata subito al display**. Non esistono più "Auto Update" né "Update Display" (risolve P3). Se l'orologio è visibile, una modifica alle sue opzioni lo aggiorna immediatamente. Se è visibile un'immagine, la modifica viene memorizzata e applicata alla prossima attivazione dell'orologio. Cambiare un'impostazione non cambia mai il contenuto mostrato: lo decide solo `Mode`.
 - **F6.4** L'ora inviata al pannello è quella del **fuso orario configurato in HA** (risolve P7).
-- **F6.5** L'ora viene sincronizzata automaticamente a ogni connessione, a ogni attivazione dell'orologio, almeno una volta al giorno e subito dopo i cambi di ora legale. [V7]
+- **F6.5** L'ora viene sincronizzata automaticamente a ogni connessione, a ogni attivazione dell'orologio, a ogni riaccensione dello schermo, una volta al giorno e subito dopo i cambi di ora legale. Le sincronizzazioni pianificate saltano lo schermo spento, perché la sincronizzazione lo riaccenderebbe: l'ora arriva alla riaccensione. [V7]
 - **F6.6** A mezzanotte, se l'orologio è visibile, l'integrazione aggiorna la data sul pannello. È innocuo anche se il pannello la facesse avanzare da solo. [V3]
-- **F6.7** Il pulsante **`Sync time`** (Configuration) resta disponibile per forzare la sincronizzazione.
+- **F6.7** Il pulsante **`Sync time`** (Configuration) resta disponibile per forzare la sincronizzazione. Se lo schermo è spento lo riaccende, e `Power` lo riflette. [V7]
 
 *Accettazione*: con HA impostato su Europe/Rome e il container in UTC, il pannello mostra l'ora italiana. Cambiando lo stile con l'orologio visibile, il pannello si aggiorna entro un paio di secondi.
 
