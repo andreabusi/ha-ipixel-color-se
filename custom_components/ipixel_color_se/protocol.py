@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from pypixelcolor.commands.set_brightness import set_brightness as _set_brightness
+from pypixelcolor.commands.set_clock_mode import set_clock_mode as _set_clock_mode
 from pypixelcolor.commands.set_orientation import set_orientation as _set_orientation
 from pypixelcolor.commands.set_power import set_power as _set_power
 from pypixelcolor.commands.set_time import set_time as _set_time
@@ -69,6 +70,28 @@ def brightness(level: int) -> SendPlan:
 def orientation(value: int) -> SendPlan:
     """Set the orientation, 0 to 3."""
     return _convert(_set_orientation(value))
+
+
+def clock_mode(
+    style: int, format_24h: bool, show_date: bool, now: datetime
+) -> SendPlan:
+    """Show the clock in a style, with the date of now.
+
+    pypixelcolor takes styles 0 to 8; the panel shows 1 to 9 (check V5).
+
+    The panel keeps its own time, set by set_time: the command carries only
+    the date. pypixelcolor takes it as DD/MM/YY and works out the weekday
+    from the two-digit year, which stays right because 2000 years are whole
+    Gregorian cycles.
+    """
+    return _convert(
+        _set_clock_mode(
+            style=style,
+            date=now.strftime("%d/%m/%y"),
+            show_date=show_date,
+            format_24=format_24h,
+        )
+    )
 
 
 def set_time(now: datetime) -> SendPlan:

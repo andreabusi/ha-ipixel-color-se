@@ -27,6 +27,50 @@ def test_simple_commands_wait_for_an_ack(plan: protocol.SendPlan, data: str) -> 
     assert not plan.response
 
 
+@pytest.mark.parametrize(
+    ("now", "date"),
+    [
+        # A Sunday: the weekday goes from 1, Monday, to 7
+        (datetime(2026, 11, 8, 0, 0, 5), "1a 0b 08 07"),
+        # A leap day, on a Tuesday
+        (datetime(2028, 2, 29, 12, 0), "1c 02 1d 02"),
+        (datetime(2099, 12, 31, 23, 59, 59), "63 0c 1f 04"),
+    ],
+)
+def test_clock_mode_carries_the_date(now: datetime, date: str) -> None:
+    """The date goes as DD/MM/YY: the weekday from a two-digit year stays right."""
+    plan = protocol.clock_mode(1, True, True, now)
+
+    assert plan.windows == (
+        protocol.Window(data=bytes.fromhex(f"0b 00 06 01 01 01 01 {date}"), ack=True),
+    )
+    assert not plan.final_ack
+    assert not plan.response
+
+
+@pytest.mark.parametrize(
+    ("style", "format_24h", "show_date", "options"),
+    [
+        (1, True, True, "01 01 01"),
+        (8, False, False, "08 00 00"),
+        (3, False, True, "03 00 01"),
+    ],
+)
+def test_clock_mode_options(
+    style: int, format_24h: bool, show_date: bool, options: str
+) -> None:
+    """Style, 24-hour format and date follow the header, and get an ACK (check V9)."""
+    plan = protocol.clock_mode(
+        style, format_24h, show_date, datetime(2026, 11, 7, 19, 17)
+    )
+
+    assert plan.windows == (
+        protocol.Window(
+            data=bytes.fromhex(f"0b 00 06 01 {options} 1a 0b 07 06"), ack=True
+        ),
+    )
+
+
 def test_set_time_expects_the_info_frame() -> None:
     """set_time carries the given time and waits for a response, not an ACK."""
     plan = protocol.set_time(datetime(2026, 11, 7, 19, 17, 2))

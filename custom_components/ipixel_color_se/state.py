@@ -11,7 +11,10 @@ from typing import Any
 BRIGHTNESS_MIN = 1  # 0 gives the same faint light as 1 (check V6)
 BRIGHTNESS_MAX = 100
 ORIENTATIONS = 4
-CLOCK_STYLES = 9
+# The clock styles pypixelcolor accepts and the panel shows (check V5). The
+# panel ignores 0, and has a ninth style, 9, that pypixelcolor rejects.
+CLOCK_STYLE_MIN = 1
+CLOCK_STYLE_MAX = 8
 
 
 class Mode(StrEnum):
@@ -34,7 +37,7 @@ class ImageFit(StrEnum):
 class ClockSettings:
     """The options of the clock."""
 
-    style: int = 0
+    style: int = CLOCK_STYLE_MIN
     format_24h: bool = True
     show_date: bool = True
 
@@ -98,7 +101,10 @@ class DisplayState:
             mode=_enum(Mode, data.get("mode"), None),
             clock=ClockSettings(
                 style=_int(
-                    clock.get("style"), default.clock.style, 0, CLOCK_STYLES - 1
+                    clock.get("style"),
+                    default.clock.style,
+                    CLOCK_STYLE_MIN,
+                    CLOCK_STYLE_MAX,
                 ),
                 format_24h=_bool(clock.get("format_24h"), default.clock.format_24h),
                 show_date=_bool(clock.get("show_date"), default.clock.show_date),

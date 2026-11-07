@@ -21,7 +21,7 @@ def test_defaults() -> None:
     assert state.brightness is None
     assert state.orientation == 0
     assert state.mode is None
-    assert state.clock == ClockSettings(style=0, format_24h=True, show_date=True)
+    assert state.clock == ClockSettings(style=1, format_24h=True, show_date=True)
     assert state.image_fit is ImageFit.FILL
     assert state.image is None
     assert state.auto_reconnect
@@ -69,6 +69,7 @@ def test_missing_values_get_their_default() -> None:
         {"orientation": 4},
         {"orientation": -1},
         {"mode": "text"},
+        {"clock": {"style": 0}},
         {"clock": {"style": 9}},
         {"clock": "style_1"},
         {"image_fit": "stretch"},

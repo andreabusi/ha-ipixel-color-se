@@ -33,6 +33,7 @@ _COMMANDS = {
     b"\x01\x80": "set_time",
     b"\x04\x80": "brightness",
     b"\x06\x80": "orientation",
+    b"\x06\x01": "clock",
     b"\x07\x01": "power",
 }
 
@@ -43,7 +44,11 @@ def ack(command: bytes, status: int = 1) -> bytes:
 
 
 def describe(command: bytes) -> str:
-    """Name a command written to the panel, like "power off" or "brightness 40"."""
+    """Name a command written to the panel, like "power off" or "brightness 40".
+
+    The clock shows its style and options, like "clock 1 24h date" or
+    "clock 3 12h"; panel_date() reads its date.
+    """
     match _COMMANDS.get(command[2:4]):
         case "power":
             return "power on" if command[4] else "power off"
@@ -51,8 +56,30 @@ def describe(command: bytes) -> str:
             return f"{name} {command[4]}"
         case "set_time":
             return "set_time"
+        case "clock":
+            style, format_24h, show_date = command[4:7]
+            return f"clock {style} {'24h' if format_24h else '12h'}" + (
+                " date" if show_date else ""
+            )
         case _:
             return command.hex(" ")
+
+
+def panel_time(command: bytes) -> str:
+    """Return the time a set_time command carries, like "19:17:02"."""
+    assert describe(command) == "set_time"
+    hour, minute, second = command[4:7]
+    return f"{hour:02}:{minute:02}:{second:02}"
+
+
+def panel_date(command: bytes) -> str:
+    """Return the date a clock command carries, like "08/11/26 7".
+
+    The last number is the weekday, 1 for Monday to 7 for Sunday.
+    """
+    assert describe(command).startswith("clock")
+    year, month, day, weekday = command[7:11]
+    return f"{day:02}/{month:02}/{year:02} {weekday}"
 
 
 class FakeBleakClient:
@@ -148,14 +175,16 @@ class FakePanel:
     def answer(self, data: bytes) -> list[bytes]:
         """Answer a command the way the panel does.
 
-        Brightness and orientation turn the screen back on (check V1).
+        Brightness, orientation and set_time turn the screen back on (checks
+        V1 and V7), like any content, the clock included.
         """
         match describe(data).split()[0]:
             case "set_time":
+                self.screen_on = True
                 return [self.info_frame]
             case "power":
                 self.screen_on = bool(data[4])
-            case "brightness" | "orientation":
+            case "brightness" | "orientation" | "clock":
                 self.screen_on = True
         return [ack(data)]
 

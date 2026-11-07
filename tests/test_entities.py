@@ -27,6 +27,11 @@ from .test_init import setup_entry
 POWER = "switch.kitchen_pixel_power"
 BRIGHTNESS = "number.kitchen_pixel_brightness"
 ORIENTATION = "select.kitchen_pixel_orientation"
+MODE = "select.kitchen_pixel_mode"
+CLOCK_STYLE = "select.kitchen_pixel_clock_style"
+CLOCK_24H = "switch.kitchen_pixel_clock_24_hour_format"
+CLOCK_SHOW_DATE = "switch.kitchen_pixel_clock_show_date"
+SYNC_TIME = "button.kitchen_pixel_sync_time"
 AUTO_RECONNECT = "switch.kitchen_pixel_auto_reconnect"
 DISCONNECT = "button.kitchen_pixel_disconnect"
 CONNECTED = "binary_sensor.kitchen_pixel_connected"
@@ -56,6 +61,11 @@ async def test_entities_are_prefixed_with_the_display_name(
     assert entities == {
         POWER: (f"{ADDRESS}_power", None),
         BRIGHTNESS: (f"{ADDRESS}_brightness", None),
+        MODE: (f"{ADDRESS}_mode", None),
+        CLOCK_STYLE: (f"{ADDRESS}_clock_style", EntityCategory.CONFIG),
+        CLOCK_24H: (f"{ADDRESS}_clock_24h", EntityCategory.CONFIG),
+        CLOCK_SHOW_DATE: (f"{ADDRESS}_clock_show_date", EntityCategory.CONFIG),
+        SYNC_TIME: (f"{ADDRESS}_sync_time", EntityCategory.CONFIG),
         ORIENTATION: (f"{ADDRESS}_orientation", EntityCategory.CONFIG),
         AUTO_RECONNECT: (f"{ADDRESS}_auto_reconnect", EntityCategory.CONFIG),
         DISCONNECT: (f"{ADDRESS}_disconnect", EntityCategory.CONFIG),
@@ -122,11 +132,16 @@ async def test_two_displays(
         for platform, key in (
             ("binary_sensor", "connected"),
             ("button", "disconnect"),
+            ("button", "sync_time"),
             ("number", "brightness"),
+            ("select", "clock_style"),
+            ("select", "mode"),
             ("select", "orientation"),
             ("sensor", "height"),
             ("sensor", "width"),
             ("switch", "auto_reconnect"),
+            ("switch", "clock_24_hour_format"),
+            ("switch", "clock_show_date"),
             ("switch", "power"),
         )
     )
@@ -200,6 +215,89 @@ async def test_orientation(
     assert mock_panel.commands == ["orientation 2"]
 
 
+async def test_mode(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Mode is unknown until HA shows something (F7.4); Clock shows the clock."""
+    await setup_entry(hass, mock_config_entry)
+    state = hass.states.get(MODE)
+    assert state.state == STATE_UNKNOWN
+    assert state.attributes["options"] == ["clock"]
+    assert state.attributes["friendly_name"] == f"{NAME} Mode"
+    mock_panel.writes.clear()
+
+    await call(
+        hass,
+        "select",
+        SERVICE_SELECT_OPTION,
+        **{ATTR_ENTITY_ID: MODE, ATTR_OPTION: "clock"},
+    )
+
+    assert hass.states.get(MODE).state == "clock"
+    assert mock_panel.commands == ["clock 1 24h date", "set_time"]
+
+
+async def test_clock_options(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """The clock's options are settings, sent at once while the clock is shown."""
+    await setup_entry(hass, mock_config_entry)
+    state = hass.states.get(CLOCK_STYLE)
+    assert state.state == "planet_yellow"
+    assert state.attributes["options"] == [
+        "planet_yellow",
+        "planet_gradient",
+        "planet_blue",
+        "frame_gradient",
+        "frame_yellow",
+        "frame_multicolor",
+        "hourglass_yellow",
+        "hourglass_orange",
+    ]
+    assert hass.states.get(CLOCK_24H).state == STATE_ON
+    assert hass.states.get(CLOCK_24H).attributes["friendly_name"] == (
+        f"{NAME} Clock 24-hour format"
+    )
+    assert hass.states.get(CLOCK_SHOW_DATE).state == STATE_ON
+    await call(
+        hass,
+        "select",
+        SERVICE_SELECT_OPTION,
+        **{ATTR_ENTITY_ID: MODE, ATTR_OPTION: "clock"},
+    )
+    mock_panel.writes.clear()
+
+    await call(
+        hass,
+        "select",
+        SERVICE_SELECT_OPTION,
+        **{ATTR_ENTITY_ID: CLOCK_STYLE, ATTR_OPTION: "hourglass_orange"},
+    )
+    await call(hass, "switch", SERVICE_TURN_OFF, **{ATTR_ENTITY_ID: CLOCK_24H})
+    await call(hass, "switch", SERVICE_TURN_OFF, **{ATTR_ENTITY_ID: CLOCK_SHOW_DATE})
+
+    assert hass.states.get(CLOCK_STYLE).state == "hourglass_orange"
+    assert hass.states.get(CLOCK_24H).state == STATE_OFF
+    assert hass.states.get(CLOCK_SHOW_DATE).state == STATE_OFF
+    assert mock_panel.commands == [
+        "clock 8 24h date",
+        "clock 8 12h date",
+        "clock 8 12h",
+    ]
+
+
+async def test_sync_time(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Sync time sends HA's time."""
+    await setup_entry(hass, mock_config_entry)
+    mock_panel.writes.clear()
+
+    await call(hass, "button", SERVICE_PRESS, **{ATTR_ENTITY_ID: SYNC_TIME})
+
+    assert mock_panel.commands == ["set_time"]
+
+
 async def test_disconnect_and_auto_reconnect(
     hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -248,7 +346,17 @@ async def test_controls_need_the_panel(
 
     await setup_entry(hass, mock_config_entry)
 
-    for entity_id in (POWER, BRIGHTNESS):
+    for entity_id in (POWER, BRIGHTNESS, MODE):
         assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
-    for entity_id in (ORIENTATION, AUTO_RECONNECT, DISCONNECT, CONNECTED, WIDTH):
+    for entity_id in (
+        CLOCK_STYLE,
+        CLOCK_24H,
+        CLOCK_SHOW_DATE,
+        SYNC_TIME,
+        ORIENTATION,
+        AUTO_RECONNECT,
+        DISCONNECT,
+        CONNECTED,
+        WIDTH,
+    ):
         assert hass.states.get(entity_id).state != STATE_UNAVAILABLE

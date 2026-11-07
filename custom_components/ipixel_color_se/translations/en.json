@@ -54,6 +54,9 @@
       }
     },
     "button": {
+      "sync_time": {
+        "name": "Sync time"
+      },
       "disconnect": {
         "name": "Disconnect"
       }
@@ -64,6 +67,25 @@
       }
     },
     "select": {
+      "mode": {
+        "name": "Mode",
+        "state": {
+          "clock": "Clock"
+        }
+      },
+      "clock_style": {
+        "name": "Clock style",
+        "state": {
+          "planet_yellow": "Planet, yellow",
+          "planet_gradient": "Planet, gradient",
+          "planet_blue": "Planet, blue",
+          "frame_gradient": "Frame, gradient",
+          "frame_yellow": "Frame, yellow",
+          "frame_multicolor": "Frame, multicolor",
+          "hourglass_yellow": "Hourglass, yellow",
+          "hourglass_orange": "Hourglass, orange"
+        }
+      },
       "orientation": {
         "name": "Orientation",
         "state": {
@@ -85,6 +107,12 @@
     "switch": {
       "power": {
         "name": "Power"
+      },
+      "clock_24h": {
+        "name": "Clock 24-hour format"
+      },
+      "clock_show_date": {
+        "name": "Clock show date"
       },
       "auto_reconnect": {
         "name": "Auto reconnect"

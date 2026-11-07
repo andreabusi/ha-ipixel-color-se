@@ -37,7 +37,7 @@
       'clock': dict({
         'format_24h': True,
         'show_date': True,
-        'style': 0,
+        'style': 1,
       }),
       'image': None,
       'image_fit': 'fill',

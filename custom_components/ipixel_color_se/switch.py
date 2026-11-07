@@ -32,6 +32,20 @@ SWITCHES = (
         set_fn=lambda controller, on: controller.async_set_power(on),
     ),
     IPixelSwitchEntityDescription(
+        key="clock_24h",
+        translation_key="clock_24h",
+        entity_category=EntityCategory.CONFIG,
+        is_on_fn=lambda state: state.clock.format_24h,
+        set_fn=lambda controller, on: controller.async_set_clock(format_24h=on),
+    ),
+    IPixelSwitchEntityDescription(
+        key="clock_show_date",
+        translation_key="clock_show_date",
+        entity_category=EntityCategory.CONFIG,
+        is_on_fn=lambda state: state.clock.show_date,
+        set_fn=lambda controller, on: controller.async_set_clock(show_date=on),
+    ),
+    IPixelSwitchEntityDescription(
         key="auto_reconnect",
         translation_key="auto_reconnect",
         entity_category=EntityCategory.CONFIG,
@@ -59,7 +73,7 @@ class IPixelSwitch(IPixelEntity, SwitchEntity):
 
     @property
     def is_on(self) -> bool:
-        """Return the last state the panel accepted."""
+        """Return the last state the panel accepted, or the saved setting."""
         return self.entity_description.is_on_fn(self.controller.state)
 
     async def async_turn_on(self, **kwargs: Any) -> None:

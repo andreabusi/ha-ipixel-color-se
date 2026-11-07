@@ -1,6 +1,9 @@
 {
   "entity": {
     "button": {
+      "sync_time": {
+        "default": "mdi:clock-check-outline"
+      },
       "disconnect": {
         "default": "mdi:bluetooth-off"
       }
@@ -11,6 +14,15 @@
       }
     },
     "select": {
+      "mode": {
+        "default": "mdi:monitor",
+        "state": {
+          "clock": "mdi:clock-outline"
+        }
+      },
+      "clock_style": {
+        "default": "mdi:clock-digital"
+      },
       "orientation": {
         "default": "mdi:screen-rotation"
       }
@@ -28,6 +40,15 @@
         "default": "mdi:power",
         "state": {
           "off": "mdi:power-off"
+        }
+      },
+      "clock_24h": {
+        "default": "mdi:hours-24"
+      },
+      "clock_show_date": {
+        "default": "mdi:calendar",
+        "state": {
+          "off": "mdi:calendar-remove"
         }
       },
       "auto_reconnect": {
