@@ -16,3 +16,7 @@ htmlcov/
 # Editors and OS
 .idea/
 .DS_Store
+
+# Local settings of the developer's setup, never versioned
+scripts/deploy.env
+CLAUDE.local.md
