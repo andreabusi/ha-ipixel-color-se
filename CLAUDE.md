@@ -15,13 +15,13 @@ The design documents in `specs/` are written in Italian and are the source of tr
 
 Work one milestone at a time. Start a milestone only when the user asks, and don't implement anything that belongs to a later one. When a decision changes, update the spec or the plan.
 
-**Current state**: M0 (skeleton). The integration loads, has no entities, and its config flow aborts with `not_yet_available`. Update this line at the end of each milestone.
+**Current state**: M1 (connection and configuration). Discovery and config flow, `IPixelConnection`, a minimal controller that connects once at startup, the `Connected`, `Width` and `Height` entities, basic diagnostics. There's no reconnection yet: it arrives in M2 with the full controller. Update this line at the end of each milestone.
 
 ## Conventions
 
 - **Language**: code, identifiers, comments, logs, entity names, entity_ids and UI strings are in English. Talk to the user in Italian; the specs stay in Italian.
 - **Strings**: `translations/en.json` is the only strings file. There is no `strings.json`, because the two diverged in the reference. Icons go in `icons.json`. Hassfest requires `config.step` in `en.json` as soon as there's a config flow, even if it's empty.
-- **Entities**: `_attr_has_entity_name = True`, `translation_key = key`, `unique_id = f"{address}_{key}"`, with the keys from plan §6. Don't set a suggested area. If the device already has an area when its entities are created, HA puts the area in the entity_ids too (that's how the reference got `binary_sensor.taverna_pixel_led_display_connected`). Check the real entity_id in HA after adding an entity rather than deriving it from the name.
+- **Entities**: `_attr_has_entity_name = True`, `translation_key = key`, `unique_id = f"{address}_{key}"`, with the keys from plan §6. Since HA 2026.10, identifiers and connections are unique only within a config entry, so our device never merges with the old integration's: look devices up with `async_get_device_by_identifier(identifier, entry_id)`, not the deprecated `async_get_device`. Don't set a suggested area. If the device already has an area when its entities are created, HA puts the area in the entity_ids too (that's how the reference got `binary_sensor.taverna_pixel_led_display_connected`). Check the real entity_id in HA after adding an entity rather than deriving it from the name.
 - **Errors**: actions raise translated exceptions (`HomeAssistantError` or `ServiceValidationError` with `translation_domain=DOMAIN`), with the keys from plan §10. A failed action must show in the UI and fail the automation, not only end up in the log.
 - **Logging**: `debug` for traffic, `warning` for unexpected disconnects and failed restores. Don't log every command at `info`.
 - **No polling** (T4): states change on events. Fixed data (address, type, width, height) is read once by the config flow and kept in `entry.data`.
@@ -44,6 +44,9 @@ docker run --rm --platform linux/amd64 -v "$PWD":/github/workspace ghcr.io/home-
 - `pyproject.toml` only holds development tools: the integration isn't a Python package, and HA installs its requirements from `manifest.json`.
 - `pytest-homeassistant-custom-component==0.13.371` pins `homeassistant==2026.10.0`, the minimum supported version. It doesn't install the requirements of HA's own integrations. We depend on `bluetooth_adapters`, which pulls in `bluetooth` and `usb`, so `aiousbwatcher`, `dbus-fast` and `serialx` are listed explicitly, with the versions from the HA manifests. Update them when you bump the pin.
 - `tests/conftest.py` enables custom integrations and mocks the Bluetooth stack (`enable_bluetooth`) in every test. Pytest runs with `asyncio_mode = auto`.
+- The `mock_panel` fixture (`tests/common.py`) puts a simulated panel in range: it patches `establish_connection`, `async_ble_device_from_address`, `async_address_present` and `async_discovered_service_info` where our modules import them, and answers like the real panel (info frame to `set_time`, ACK to the rest, sent before the write returns). Change its `responder`, `info_frame`, `present` or `*_error` attributes to simulate failures.
+- The first connection runs as a background task: wait for it with `hass.async_block_till_done(wait_background_tasks=True)`. Freeze time with `@pytest.mark.freeze_time`, not `freezer.move_to` in the test body, when the test also uses `hass_client`: a token issued "in the future" gets a 401.
+- `tests/snapshots/` holds the syrupy snapshots. After a deliberate change, regenerate them with `uv run pytest --snapshot-update` and review the diff.
 - Ruff excludes `specs/`, because it would reformat the code blocks in the Markdown documents.
 - The hassfest image is amd64 only: on Apple Silicon it runs emulated.
 - CI (`.github/workflows/ci.yml`) runs ruff and pytest, hassfest, and the HACS validation. The HACS check `brands` is ignored until the `brand/` folder arrives in M5. HACS also checks the GitHub repository's description and topics.
@@ -66,6 +69,7 @@ scripts/deploy.sh --no-restart
 - Logs: `home-assistant.log` in the config dir (`/config` in the container), or `docker logs <container>`, over SSH.
 - REST API: `http://<ha-host>:8123/api/`, with an admin token kept in a file outside the repository. **Never print it**: send it as `-H "Authorization: Bearer $(tr -d '[:space:]' < "$TOKEN_FILE")"`. Entity states, actions and config flows can all be checked this way (for example `GET /api/config/config_entries/flow_handlers`).
 - The user does the visual checks on the panel and the power cycles.
+- **Panel checks without the integration** (how V4 and V9 were done): with no integration connected to the panel, pipe a bleak script into the container, `ssh <host> 'docker exec -i <container> python3 -' < probe.py`. It talks to BlueZ directly through the host's local adapter. Log every notification with a timestamp, and leave the panel as you found it. For advertising, HA's bluetooth config entry diagnostics (`GET /api/diagnostics/config_entry/<id>`) give the `time` of the last advertisement per address.
 
 Debug logging, in HA's `configuration.yaml`:
 
@@ -115,8 +119,8 @@ The panel accepts a single BLE connection. While HA holds it, the phone app and 
 
 ### GATT and framing
 
-- Discovery: local name `LED_BLE_*` and service UUID `0000fa01-0000-1000-8000-00805f9b34fb`. The matchers go into `manifest.json` in M1, not before: otherwise HA would offer the panel in production too early.
-- Write characteristic `0000fa02-0000-1000-8000-00805f9b34fb`, notify characteristic `0000fa03-0000-1000-8000-00805f9b34fb`.
+- Advertising: local name `LED_BLE_*` and manufacturer data for company 21076 (`0x5254`), but **no service UUID**. The manifest's second matcher, `service_uuid: 0000fa01-…` (kept from the reference), never matches this panel: only the name does.
+- GATT: service `000000fa-0000-1000-8000-00805f9b34fb`, with write characteristic `0000fa02-…` (write and write without response) and notify characteristic `0000fa03-…`. The panel also has a `0000ae00-…` service (`ae01` write, `ae02` notify) that nobody uses.
 - Commands are framed as `[length LE16][opcode LE16][payload]`, where the length includes the 4 header bytes. Brightness, for example, is opcode `0x8004` with a 1–100 byte, and power is `05 00 07 01 <0|1>`.
 - pypixelcolor's clock command only takes a two-digit year (`DD/MM/YY`). The weekday stays right because 2000 years are whole Gregorian cycles.
 
@@ -124,7 +128,8 @@ The panel accepts a single BLE connection. While HA holds it, the phone app and 
 
 - Each window of a transfer is written in 244-byte chunks. On the local BlueZ adapter a single write can't exceed 512 bytes.
 - After each window the panel answers `05 00 xx xx <status>`: status `0` or `1` means the window was received, `3` means the transfer is done. Wait up to 8 s for it before sending the next window.
-- pypixelcolor's own transport waits for an ACK after simple commands too (power, brightness), while the reference treated it as optional. Whether every command gets one is check V9, done in M1.
+- Check V9 (2026-11-07): every simple command (brightness, orientation, power on and off, clock mode) gets an ACK `05 00 <id> <type> 01`, echoing bytes 2–3 of the command, in about 30 ms. The ACK can arrive **before the write itself returns**, so the wait must be armed before writing.
+- **`set_time` gets no ACK**: the panel answers with its info frame `0c 00 01 80 <type> …`, because it's the same command as pypixelcolor's `get_device_info`. pypixelcolor's own `set_time` plan waits for an ACK and would always time out after 8 s: in `protocol.py` it's a request with a response instead. Byte 4 is the panel type: `0x81` means 32×32.
 
 ### Power state
 
@@ -133,6 +138,10 @@ The panel accepts a single BLE connection. While HA holds it, the phone app and 
 - An HA restart leaves the screen as it was, because the panel keeps its power.
 - A power cycle boots the panel with the screen on, showing its built-in GIFs: the mode isn't restored.
 - Every disconnect seen so far was the panel losing power.
+
+### Advertising while connected
+
+Check V4 (2026-11-07): the panel **stops advertising while it's connected**, and starts again, several times a second, as soon as the connection closes. So the RSSI (`Signal strength`) only updates while disconnected, and HA's Bluetooth manager eventually considers a connected panel unavailable: while connected, ignore the reachability computed from advertisements.
 
 ### Reconnection quirks
 

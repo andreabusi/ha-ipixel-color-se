@@ -3,7 +3,7 @@
 A Home Assistant integration for iPixel Color Bluetooth LED matrix displays, also sold as the "B.K. Light LED Pixel Board".
 
 > [!WARNING]
-> **In development.** This version is only the project skeleton: Home Assistant loads the integration, but it can't add a display yet.
+> **In development.** This version finds and adds displays, and shows whether each one is connected and its resolution. It can't control a display yet. Automatic reconnection comes with the next version.
 
 ## Planned for the first release
 

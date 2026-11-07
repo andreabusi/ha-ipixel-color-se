@@ -110,7 +110,8 @@ class DisplayState:
 - **`async_send(plan)`**: sotto un `asyncio.Lock`, che serve le richieste in ordine di arrivo (F3.1, F8.10).
   - Per ogni finestra del plan scrive blocchi da 244 byte (`response=True`).
   - Se la policy del plan lo richiede, attende l'ACK `05 00 xx xx <status>`: `0` o `1` per la finestra, `3` per la fine. Il timeout è di 8 s.
-  - È la stessa semantica del trasporto di pypixelcolor, applicata a **tutti** i comandi in modo uniforme. Va confermato che anche i comandi semplici ricevano un ACK ([V9], §12).
+  - È la stessa semantica del trasporto di pypixelcolor, applicata a **tutti** i comandi in modo uniforme. Confermato da V9 (§12): i comandi semplici ricevono un ACK in circa 30 ms, a volte prima che la scrittura sia confermata, quindi l'attesa si prepara prima di scrivere.
+  - Eccezione: **`set_time`** non riceve un ACK ma il frame delle informazioni del pannello, perché è lo stesso comando. Per questo `protocol.set_time` è una richiesta con risposta.
 - **`async_request(plan)`**: invia e restituisce il primo frame di risposta. Si usa per le informazioni del pannello.
 - **Callback di stato**: `on_connected` e `on_disconnected(expected: bool)`. Il flag distingue un `Disconnect` voluto da una caduta della connessione.
 
@@ -219,7 +220,7 @@ Le piattaforme dichiarano `PARALLEL_UPDATES = 0`, perché la serializzazione la 
   - `data = {address, device_type, width, height}`;
   - nessuna `options`: le impostazioni sono entità.
 - **Manifest**:
-  - matcher `bluetooth` su `local_name: LED_BLE_*` e `service_uuid: 0000fa01-…`, entrambi `connectable: true`;
+  - matcher `bluetooth` su `local_name: LED_BLE_*` e `service_uuid: 0000fa01-…`, entrambi `connectable: true`. Il pannello di prova trasmette solo il nome e i manufacturer data, senza UUID, e il suo servizio GATT è `000000fa-…`: lo riconosce solo il primo matcher;
   - `dependencies: ["bluetooth_adapters", "media_source"]`;
   - `integration_type: device`, `iot_class: local_push`, `requirements: ["pypixelcolor==0.5.0"]`.
 
@@ -340,15 +341,22 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 
 **V9** è una prova nuova, emersa in questa fase: il trasporto di pypixelcolor attende un ACK anche per i comandi semplici (accensione, luminosità), mentre il riferimento lo trattava come facoltativo. Se qualche comando non risponde, quel comando non attenderà l'ACK e verrà considerato riuscito dopo la scrittura.
 
+### Esiti delle prove
+
+| Prova | Data | Esito |
+|---|---|---|
+| **V9** | 2026-11-07 | Luminosità, orientamento, accensione, spegnimento e orologio ricevono l'ACK `05 00 <id> <tipo> 01`, che ripete i byte 2–3 del comando. `set_time` riceve invece il frame delle informazioni `0c 00 01 80 <tipo> …`: il `set_time` di pypixelcolor, che attende un ACK, andrebbe sempre in timeout. Il pannello di prova è di tipo `0x81`, cioè 32×32. |
+| **V4** | 2026-11-07 | Da connesso il pannello **smette** di trasmettere advertising, e riprende subito, più volte al secondo, appena la connessione si chiude. `Signal strength` si aggiorna quindi solo a pannello disconnesso. In M2 la raggiungibilità calcolata dagli advertising va ignorata mentre il pannello è connesso, perché il manager Bluetooth di HA prima o poi lo considera non disponibile. |
+
 ---
 
 ## 13. Rischi
 
 | Rischio | Effetto | Mitigazione |
 |---|---|---|
-| Un comando semplice non riceve ACK (V9) | Errori spuri | Si verifica in M1. Per quel comando l'ACK diventa facoltativo. |
+| Un comando semplice non riceve ACK (V9) | Errori spuri | Verificato in M1: tutti lo ricevono, tranne `set_time`, che riceve una risposta e viene trattato come richiesta. |
 | pypixelcolor cambia i moduli interni | Rotture all'aggiornamento | Pin esatto e import confinati in `protocol.py`, coperti da `test_protocol.py` |
-| Il pannello non trasmette advertising da connesso (V4) | `Signal strength` fermo durante la connessione | Si accetta e si documenta (il sensore è disattivato di default) |
+| Il pannello non trasmette advertising da connesso (V4) | `Signal strength` fermo durante la connessione | Confermato in M1. Si accetta e si documenta (il sensore è disattivato di default) |
 | Ripristino a ogni avvio di HA | Una GIF viene ritrasmessa a ogni riavvio, qualche secondo di trasferimento | Accettato: garantisce la coerenza (F9) |
 | URL esterni non più raggiungibili al ripristino | L'immagine non torna | Ripiego sull'orologio (F9.4), già deciso |
 | Pannello e HA in competizione con l'app del telefono | Connessioni rubate | `Disconnect` spegne `Auto reconnect` (F3.6) |
