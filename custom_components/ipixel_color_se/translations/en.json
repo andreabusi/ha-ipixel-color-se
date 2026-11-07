@@ -1,0 +1,8 @@
+{
+  "config": {
+    "step": {},
+    "abort": {
+      "not_yet_available": "iPixel Color SE can't set up displays yet. Support for adding a display arrives in a later version."
+    }
+  }
+}
