@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, to catch new hassfest and HACS rules
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    name: Ruff and pytest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.3
+      - name: Install dependencies
+        run: uv sync --locked
+      - name: Lint
+        run: uv run --locked ruff check
+      - name: Check formatting
+        run: uv run --locked ruff format --check
+      - name: Run tests
+        run: uv run --locked pytest
+
+  hassfest:
+    name: Hassfest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: home-assistant/actions/hassfest@master
+
+  hacs:
+    name: HACS validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: hacs/action@22.5.0
+        with:
+          category: integration
+          # The brand icons arrive in milestone M5
+          ignore: brands
+          comment: false
