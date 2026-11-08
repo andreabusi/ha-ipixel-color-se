@@ -22,7 +22,7 @@ Il documento descrive **come** realizzare la specifica: architettura, moduli, fl
 - **Una sola fonte di verità**: lo stato voluto vive nel controller ed è salvato in un unico file per display (`Store` di HA). Le entità non si leggono più a vicenda, come accadeva nel riferimento.
 - **Riconnessione**: si basa su `bluetooth.async_register_advertisement_callback`, verificata nel codice di HA 2026.10: riceve ogni advertisement, anche se identico al precedente.
 - **Test automatici** con `pytest-homeassistant-custom-component` su HA 2026.10.0. La CI su GitHub esegue anche hassfest e la validazione HACS.
-- **Sei milestone** (§12), ognuna installabile e provabile sul tuo HA. Le prove sul pannello (V1–V9) sono distribuite nelle milestone in cui servono.
+- **Sei milestone** (§12), ognuna installabile e provabile sul tuo HA. Le prove sul pannello (V1–V12) sono distribuite nelle milestone in cui servono.
 
 ---
 
@@ -142,9 +142,11 @@ A **ogni** connessione riuscita, compresa la prima dopo l'avvio di HA, il contro
 4. se `power` è falso, invia lo spegnimento e si ferma;
 5. altrimenti rimostra il contenuto: `Clock` invia il comando orologio, che riaccende lo schermo e rimette la data; `Image` riscarica l'immagine e, se non è più raggiungibile, mostra l'orologio e porta `mode` su `Clock` (F9.4); se `mode` è `None` invia l'accensione.
 
-L'ordine conta: `set_time`, orientamento e luminosità riaccendono lo schermo (V1, V7), quindi lo spegnimento deve arrivare dopo. Con lo schermo spento il pannello resta senza data finché non viene riacceso: la riaccensione manda `set_time` e l'orologio (§5). In M3 il passo 5 copre `Clock` e `None`; `Image` arriva in M4.
+L'ordine conta: `set_time`, orientamento e luminosità riaccendono lo schermo (V1, V7), quindi lo spegnimento deve arrivare dopo. Con lo schermo spento il pannello resta senza data finché non viene riacceso: la riaccensione manda `set_time` e l'orologio (§5). Con lo schermo spento l'immagine non viene inviata: la manda la riaccensione, perché il pannello non l'ha ricevuta su questa connessione (§5).
 
-Il ripristino riapplica sempre lo stato completo, anche dopo un semplice riavvio di HA. È voluto: HA non può sapere se nel frattempo il pannello ha perso la corrente. Da M4, dopo l'avvio di HA il passo 5 aspetterà che HA abbia terminato l'avvio (`async_at_started`), perché le sorgenti multimediali siano pronte.
+Il ripristino riapplica sempre lo stato completo, anche dopo un semplice riavvio di HA. È voluto: HA non può sapere se nel frattempo il pannello ha perso la corrente. Una GIF viene quindi ritrasmessa a ogni avvio di HA (§13).
+
+**Immagine durante l'avvio di HA**: le sorgenti multimediali e gli URL di HA possono non funzionare finché HA non ha terminato l'avvio. In quel caso il passo 5 invia solo l'accensione, e l'immagine segue con un task in background registrato con `async_at_started`. Il task prende il lock come un comando qualsiasi. Il ripristino non aspetta l'avvio tenendo il lock, perché un'automazione che all'avvio manda un comando al pannello resterebbe bloccata.
 
 Se il ripristino fallisce (un ACK mancante con la connessione ancora aperta), il controller lo registra con un warning e lo ripete prima del comando successivo: un comando non arriva mai a un pannello che non è stato ripristinato.
 
@@ -158,14 +160,25 @@ Se il ripristino fallisce (un ACK mancante con la connessione ancora aperta), il
 3. se l'invio riesce, aggiorna lo stato, salva e avvisa le entità;
 4. se fallisce, solleva un errore tradotto (T2) e lo stato non cambia.
 
-**`Power`**: lo spegnimento invia il comando di spegnimento. L'accensione rimostra il contenuto: con `mode == Clock` invia `set_time` e il comando orologio, così il pannello riceve l'ora, la data e le opzioni cambiate a schermo spento; altrimenti invia l'accensione.
+**`Power`**: lo spegnimento invia il comando di spegnimento. L'accensione rimostra il contenuto:
+- con `mode == Clock` invia `set_time` e il comando orologio, così il pannello riceve l'ora, la data e le opzioni cambiate a schermo spento;
+- con `mode == Image` invia solo l'accensione se il pannello ha già ricevuto quell'immagine, con quell'adattamento, sulla connessione corrente: la tiene in memoria anche a schermo spento (V11). Altrimenti, per esempio dopo un'interruzione di corrente, rilegge l'immagine e la reinvia, e l'immagine stessa riaccende lo schermo;
+- altrimenti invia l'accensione.
 
-**Risveglio dell'orologio**: luminosità e orientamento riaccendono lo schermo (V1) con l'orologio che il pannello aveva, magari con ora, data o opzioni vecchie. Se lo schermo era spento e `mode == Clock`, dopo il comando il controller invia anche `set_time` e il comando orologio.
+Il controller ricorda l'immagine inviata sulla connessione corrente come coppia (`media_id`, `image_fit`). La dimentica a ogni nuova connessione, quando mostra l'orologio e quando un trasferimento comincia, perché un trasferimento interrotto può lasciare qualsiasi cosa sul pannello.
+
+**Risveglio del contenuto**: luminosità e orientamento riaccendono lo schermo (V1) con ciò che il pannello aveva. Se lo schermo era spento, dopo il comando il controller:
+- con `mode == Clock` invia anche `set_time` e il comando orologio, perché l'orologio del pannello può avere ora, data o opzioni vecchie;
+- con `mode == Image` reinvia l'immagine solo se il pannello non l'ha ricevuta sulla connessione corrente, altrimenti mostrerebbe le GIF predefinite. Se l'ha ricevuta, la mostra già da sé (V11).
+
+**Ripiego sull'orologio**: quando l'immagine va rimostrata senza che l'utente l'abbia chiesta, cioè nel ripristino, nella riaccensione con `Power` e nel risveglio da luminosità o orientamento, e la sorgente non si legge più, il controller mostra l'orologio, porta `mode` su `Clock` e scrive un warning nel log. Lo schermo si accende come richiesto (F9.4). Le azioni che chiedono proprio l'immagine (`play_media`, Play, `Mode = Image`, `Image fit`) falliscono invece con un errore visibile (F8.7). Un errore del pannello, cioè un ACK mancante o una scrittura fallita, resta comunque un errore.
 
 **Regola dell'invio immediato (F6.3, D10)**:
 - una modifica a `ClockSettings` aggiorna e salva sempre lo stato, ma invia il comando orologio solo se `mode == Clock`, `power` è vero e il pannello è connesso. Non apre una connessione: a pannello non raggiungibile l'opzione resta salvata e la applica il ripristino alla connessione successiva. Se l'invio fallisce compare l'errore, l'opzione resta salvata e il ripristino viene ripetuto prima del comando successivo;
-- `Image fit` rimanda l'immagine solo se `mode == Image`;
+- `Image fit` segue la stessa regola: rilegge e rimanda l'immagine solo se `mode == Image`, `power` è vero, il pannello è connesso e non ha già l'immagine con quell'adattamento;
 - `Orientation` si invia sempre (F11.2).
+
+**Trasferimenti (F8.10)**: un trasferimento tiene il lock di operazione dall'inizio alla fine. Un comando arrivato nel frattempo aspetta il lock e parte subito dopo l'ultimo ACK. Verificato sul pannello: una luminosità chiesta a metà di una GIF di 24 s è partita 3 ms dopo l'ACK finale.
 
 **Regola dello stato di accensione (F5.3, F5.4)**: ogni invio riuscito di contenuto, di luminosità, di orientamento o di `set_time` imposta `power = True`, perché tutti riaccendono lo schermo (V1, V7).
 
@@ -179,7 +192,7 @@ Se il ripristino fallisce (un ACK mancante con la connessione ancora aperta), il
 3. invio;
 4. `image` e `mode` vengono aggiornati, stato **playing**. In caso di errore il player torna allo stato precedente e mostra un errore.
 
-Stop corrisponde a `Mode = Clock`. Lo stato del player si deriva dal controller: playing se `mode == Image` e lo schermo è acceso, buffering durante un trasferimento, altrimenti idle.
+Stop corrisponde a `Mode = Clock`. Lo stato del player si deriva dal controller: buffering mentre un'immagine viene letta, convertita o trasmessa, anche nel ripristino; playing se `mode == Image` e lo schermo è acceso; altrimenti idle. Dopo uno Stop, titolo e `media_content_id` restano quelli dell'ultima immagine, che Play rimanda.
 
 **Sincronizzazione dell'ora (F6.5, F6.6)**:
 - `async_track_time_change` alle 00:00:05 sincronizza l'ora e, se `mode == Clock`, rimanda il comando orologio con la nuova data. Il pannello fa avanzare la data da solo (V3), quindi è solo una garanzia;
@@ -189,6 +202,8 @@ Stop corrisponde a `Mode = Clock`. Lo stato del player si deriva dal controller:
 - un errore finisce solo nel log, con un warning, perché nessuna azione dell'utente è in corso.
 
 **`Sync time`** (F6.7): connette se necessario, invia `set_time` e, se `mode == Clock`, il comando orologio con la data di oggi. Porta `power` su vero, perché `set_time` riaccende lo schermo (V7).
+
+Con un'immagine sullo schermo, `set_time` non la sostituisce con l'orologio (V12). Le sincronizzazioni pianificate e `Sync time` con `mode == Image` inviano quindi solo `set_time`.
 
 L'ora viene sempre da `homeassistant.util.dt.now()` (F6.4).
 
@@ -245,13 +260,18 @@ Le piattaforme dichiarano `PARALLEL_UPDATES = 0`, perché la serializzazione la 
 
 `image_source.async_resolve(hass, media_id)` restituisce `ImageData(bytes, format, title)`. I casi possibili:
 
-- `media-source://…`: `async_resolve_media`. Se `PlayMedia.path` è presente, il file si legge da disco; altrimenti si scarica `url`.
-- `/local/…`: si legge direttamente da `config/www/…`, senza HTTP, così funziona anche durante l'avvio. Va verificato che il percorso risolto resti dentro `www`, per evitare l'accesso a file esterni.
-- `http(s)://…`: download con la sessione aiohttp di HA, timeout 30 s, interrotto oltre 10 MB (F8.8).
-- **Formato**: si riconosce dai byte con Pillow, nell'executor. Sono ammessi GIF, PNG, JPEG, WebP e BMP. L'estensione passata a pypixelcolor deriva dal formato riconosciuto, non dal nome del file.
-- **Ridimensionamento e conversione**: `send_image_hex` di pypixelcolor, eseguito nell'executor perché è lavoro pesante, con `resize_method` preso da `image_fit`. pypixelcolor rende già nere le aree trasparenti.
+- `media-source://…`: `async_resolve_media`. Se `PlayMedia.path` è presente, il file si legge da disco: è il caso dei file di My media, che funzionano anche quando l'URL firmato è scaduto. Altrimenti si scarica `url`. Il titolo è il nome del file.
+- `/local/…`: si legge direttamente da `config/www/…`, senza HTTP, così funziona anche durante l'avvio. Il percorso risolto deve restare dentro `www`: `..` e `%2e%2e` danno `image_unavailable`. Solo un percorso relativo che inizia con `/local/` è un file locale: un URL assoluto con un percorso `/local/` si scarica.
+- `http(s)://…`: download con la sessione aiohttp di HA, timeout 30 s. Si interrompe prima di cominciare se il `Content-Length` supera 10 MB, altrimenti appena i byte ricevuti li superano (F8.8). I redirect si seguono.
+- **Limite di 10 MB**: vale per il file sorgente, letto da disco o scaricato. Quello che arriva al pannello è molto più piccolo, perché viene ridotto alla sua risoluzione.
+- **Formato**: si riconosce dai byte con Pillow, nell'executor, leggendo solo l'intestazione. Sono ammessi GIF, PNG, JPEG, WebP e BMP, qualunque sia l'estensione del nome.
+- **Conversione** (`protocol.image`, nell'executor perché è lavoro pesante):
+  - un'immagine statica diventa un PNG con Pillow prima di arrivare a pypixelcolor. Viene ruotata come dice l'EXIF, come serve per le foto dei telefoni, e i modi come CMYK o P diventano RGBA. La conversione di pypixelcolor ignora l'EXIF e non gestisce il CMYK;
+  - una GIF passa così com'è: pypixelcolor la ricodifica fotogramma per fotogramma, con tempi e loop;
+  - `protocol.image` ripete i passi di `send_image_hex` con le sue funzioni interne `_resize_image` e `_build_send_plan`, con `resize_method` preso da `image_fit` e le aree trasparenti rese nere. Fra i due passi porta a 256 colori la tavola globale delle GIF (V10): Pillow dimensiona ogni tavola sui colori del suo fotogramma, e il pannello si blocca su un fotogramma la cui tavola locale è più grande di quella globale. Le voci aggiunte sono nere e inutilizzate, e i fotogrammi non cambiano.
+- **Trasferimento**: finestre da 12 KB, con un ACK dopo ogni finestra (`05 00 03 00 01` per una GIF, `05 00 02 00 …` per un PNG) e `… 03` alla fine. Dopo l'ultima finestra arriva solo il `03`. Si accettano solo gli ACK che ripetono i byte 2–3 della finestra (§13). Durate misurate il 2026-11-08 tramite l'adattatore USB: 4,6–5,1 s per finestra, quindi 22–24 s per una GIF da 59 KB, e 0,2–1,3 s per un'immagine piccola. Tramite il proxy non sono state misurate, perché quel giorno non era registrato in HA.
 - **Riproduzione successiva**: nello stato si salva il `media_id` originale, mai l'URL firmato (F8.7).
-- **Media browser**: `media_source.async_browse_media` con un filtro sui tipi MIME `image/gif`, `image/png`, `image/jpeg`, `image/webp` e `image/bmp`.
+- **Media browser**: `media_source.async_browse_media` con un filtro sui tipi MIME `image/gif`, `image/png`, `image/jpeg`, `image/webp`, `image/bmp` e `image/x-ms-bmp` (il nome che alcune versioni di Python danno al BMP). Le cartelle restano visibili.
 
 ---
 
@@ -281,6 +301,8 @@ Tutte le azioni sollevano eccezioni tradotte, con `translation_domain = DOMAIN` 
 | `image_unsupported` | `ServiceValidationError` | Formato non ammesso |
 | `image_unavailable` | `HomeAssistantError` | Download o lettura falliti |
 
+I messaggi sulle immagini nominano la sorgente senza la query string, che può contenere un token. Lo stesso vale per il testo dell'errore: quello di aiohttp ripete l'URL completo, quindi un errore HTTP diventa solo `<status> <messaggio>`, per esempio `429 Too Many Requests`.
+
 I log usano `debug` per il traffico e `warning` per le disconnessioni inattese e i ripristini falliti. Il livello `info` non va usato per ogni comando, come invece fa il riferimento.
 
 ---
@@ -293,14 +315,15 @@ I log usano `debug` per il traffico e `warning` per le disconnessioni inattese e
 
 | File | Cosa verifica |
 |---|---|
-| `test_protocol.py` | Byte di ogni comando. Data dell'orologio passata come `DD/MM/YY` (pypixelcolor accetta solo l'anno a due cifre, e il giorno della settimana resta corretto perché 2000 anni sono cicli gregoriani completi). Decodifica delle informazioni del pannello. |
+| `test_protocol.py` | Byte di ogni comando. Data dell'orologio passata come `DD/MM/YY` (pypixelcolor accetta solo l'anno a due cifre, e il giorno della settimana resta corretto perché 2000 anni sono cicli gregoriani completi). Decodifica delle informazioni del pannello. Immagini: fotogrammi e tempi delle GIF, tavola globale da 256 colori (V10), finestre, statiche come PNG, Fill e Fit, trasparenza, EXIF, CMYK, immagini rovinate. ACK filtrati per comando. |
+| `test_image_source.py` | URL (titolo, errori, limite dal `Content-Length` e durante il download, query nascosta anche nel testo dell'errore), `/local/` (formati, percorsi fuori da `www`, limite), media source (file da disco, URL), formati non ammessi |
 | `test_connection.py` | Con un `BleakClient` finto: blocchi da 244 byte, attesa degli ACK, timeout → errore, risposta catturata, ordine del lock, disconnessione inattesa |
 | `test_controller.py` | Regole di accensione. Invio immediato condizionato a `Mode` (D10). Ordine del ripristino e ripristino fallito ripetuto prima del comando successivo. Riconnessione al primo advertisement (`sleep(0)`). Pausa dopo un tentativo fallito. `Disconnect` che spegne `Auto reconnect`. Connessione su richiesta. Disponibilità con V4. Ripiego sull'orologio. Ora di HA in Europe/Rome con sistema in UTC. Sincronizzazioni pianificate: mezzanotte, ora legale, schermo spento, nessuna riconnessione. |
 | `test_state.py` | Default, (de)serializzazione completa, valori mancanti o non validi che tornano al default |
 | `test_config_flow.py` | Discovery e conferma del nome, elenco filtrato, inserimento manuale, `cannot_connect`, `already_configured` |
 | `test_init.py` | Avvio senza pannello presente (entry caricata, entità non disponibili), scaricamento dell'entry |
 | `test_entities.py` | entity_id con il prefisso, categorie, disponibilità, chiamate alle azioni |
-| `test_media_player.py` | Sorgenti URL, `/local/` e media source. Limite di dimensione e formati. Sequenza buffering → playing, Stop → Clock |
+| `test_media_player.py` | Sorgenti URL, `/local/` e media source. Fit e Fill. Errori visibili (dimensione, formato, sorgente irraggiungibile). Sequenza buffering → playing, Stop → Clock, Play. Media browser filtrato, via WebSocket. Il ripristino dell'immagine, il ripiego sull'orologio, F8.10 e il riavvio di HA sono in `test_controller.py`. |
 | `test_diagnostics.py` | Snapshot con syrupy, incluso in pytest-homeassistant-custom-component |
 
 - **CI** (GitHub Actions): `hassfest`, validazione HACS (`hacs/action`), `ruff`, `pytest`.
@@ -352,7 +375,7 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 | **M1** | Connessione e configurazione | `protocol` (informazioni del pannello), `IPixelConnection`, config flow completo, dispositivo, `Connected`, `Width`, `Height`, diagnostica di base | **V9**: tutti i comandi usati ricevono un ACK? **V4**: il pannello continua l'advertising da connesso? | Il pannello viene rilevato, configurato con un nome e connesso. Gli entity_id hanno il prefisso. |
 | **M2** | Controller e comandi base | `state`, `controller`, Store, `Power`, `Brightness`, `Orientation` (opzioni grezze), `Auto reconnect`, `Disconnect`, riconnessione, disponibilità, ripristino dei passi 1–4 | **V1**, **V2**, **V6**, **V8**. Si rinominano le opzioni di orientamento e si fissa il minimo della luminosità. | Stacco e riattacco la corrente: si riconnette da solo e rispegne lo schermo se era spento. `Disconnect` libera il pannello per l'app. |
 | **M3** | Orologio | `Mode` (`Clock`), opzioni dell'orologio, `Sync time`, sincronizzazioni pianificate, ripristino dell'orologio | **V3**, **V5**, **V7**. Si danno i nomi agli stili. | Ora corretta con il fuso di HA. Lo stile cambia subito. Dopo un'interruzione di corrente torna l'orologio. |
-| **M4** | Immagini | `image_source`, `Image player`, `Mode` `Image`, `Image fit`, ripristino dell'immagine con ripiego sull'orologio | — | GIF e JPG da Media browser, `/local/` e URL. `Fit` e `Fill` corretti. L'immagine torna dopo un'interruzione di corrente. |
+| **M4** | Immagini | `image_source`, `Image player`, `Mode` `Image`, `Image fit`, ripristino dell'immagine con ripiego sull'orologio | **V10**, **V11**, **V12**, durata dei trasferimenti. Si corregge la tavola dei colori delle GIF. | GIF e JPG da Media browser, `/local/` e URL. `Fit` e `Fill` corretti. L'immagine torna dopo un'interruzione di corrente. |
 | **M5** | Rifinitura e rilascio | `Signal strength`, diagnostica completa, icone, `brand/`, README, validazione HACS, tag `v0.1.0` su GitHub, installazione pulita definitiva sul tuo HA e rimozione della vecchia integrazione | — | La specifica è soddisfatta (§5 F1–F11). La vecchia integrazione è rimossa. |
 
 **V9** è una prova nuova, emersa in questa fase: il trasporto di pypixelcolor attende un ACK anche per i comandi semplici (accensione, luminosità), mentre il riferimento lo trattava come facoltativo. Se qualche comando non risponde, quel comando non attenderà l'ACK e verrà considerato riuscito dopo la scrittura.
@@ -370,6 +393,10 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 | **V5** | 2026-11-07 | Sul 32×32 gli stili validi sono i valori 1–9. Lo 0 riceve l'ACK con status 1 ma non mostra nulla (resta il contenuto precedente), il 10 riceve status 0. Tutti alternano due schermate: la data (giorno della settimana in rosa, mese.giorno in azzurro, circa 5 s) e l'ora (circa 10 s), che cambia per stile: 1–3 un pianeta con l'ora sopra e minuti.secondi sotto, in giallo, gradiente o blu; 4–6 una cornice tratteggiata gradiente, gialla o multicolore; 7–9 HH:MM sopra e una clessidra con i secondi sotto, con sabbia gialla, arancione o bianca. pypixelcolor accetta 0–8, quindi usiamo 1–8 con default 1 e i nomi del §6. |
 | **V7** | 2026-11-07 | `set_time` non provoca sfarfallii né fa comparire le GIF: fa ripartire il ciclo dalla schermata della data. A schermo spento **riaccende** lo schermo, mostrando l'orologio. Le sincronizzazioni pianificate saltano quindi uno schermo spento, e la riaccensione (anche da luminosità o orientamento) invia `set_time` e l'orologio (§5). |
 | **V3** | 2026-11-07 | A mezzanotte il pannello fa avanzare da solo data e giorno della settimana. Senza corrente perde invece ora e data: riparte da circa 08:00:00, e il byte 8 del frame delle informazioni, che è il mese, torna a 0 finché un comando orologio non rimette la data. I byte 5 e 6 sono i minuti e i secondi appena impostati. Il ripristino copre tutto: `set_time` al passo 1, l'orologio al passo 5. |
+| **V10** | 2026-11-08 | Una GIF di 4 fotogrammi restava ferma sul primo, con tempi di 1 s, 0,5 s o 0,2 s, mentre una di 36 fotogrammi a 80 ms girava. La differenza era nelle tavole dei colori: pypixelcolor salva il primo fotogramma con una tavola globale dimensionata sui suoi colori (64) e gli altri con tavole locali (128). Con tavole uguali (4 e 4, oppure 256 e 256) o locali più piccole (globale 256, locali 4) la GIF gira. Il pannello si blocca quindi sul primo fotogramma la cui tavola locale è **più grande** di quella globale. `protocol.image` porta sempre la tavola globale a 256 colori (§8): con questa correzione la GIF di 4 fotogrammi gira con i suoi tempi. |
+| **V11** | 2026-11-08 | Con una GIF sullo schermo, spento e riacceso da comando, il pannello **tiene** la GIF: con il solo `power on` torna a girare, e anche la luminosità a schermo spento la riaccende. La GIF va avanti anche a schermo spento: è ricomparsa dal secondo fotogramma. Dopo un'interruzione di corrente il pannello mostra invece le GIF predefinite. La riaccensione reinvia quindi l'immagine solo se il pannello non l'ha ricevuta sulla connessione corrente (§5). |
+| **V12** | 2026-11-08 | `set_time` con una GIF sullo schermo non mostra l'orologio: la GIF resta e non cambia nulla. Le sincronizzazioni pianificate e `Sync time` vanno bene anche con `mode == Image`. |
+| **M4** | 2026-11-08 | Tramite l'adattatore USB. GIF dal Media browser: buffering → playing, con i tempi giusti dopo V10. Il Media browser mostra solo le immagini. JPG dal Media browser e da URL (Picsum, con un redirect verso un URL con `?hmac=…`): Fit con le bande nere sopra e sotto, Fill ritagliato, e ogni cambio di `Image fit` riscarica e rimanda. PNG trasparente da `/local/`: sfondo nero. Stop → orologio con `Mode = Clock`, Play e `Mode = Image` rimandano la foto. Errori visibili: file da 12,6 MB, TIFF, host inesistente. Un URL di Wikimedia ha risposto `429 Too Many Requests` alla sessione di HA, e l'errore ha mostrato che il testo di aiohttp ripeteva l'URL completo (§10). Luminosità a metà di un trasferimento: parte 3 ms dopo l'ACK finale. GIF scelta a schermo spento: `Power` torna acceso. Interruzioni di corrente: l'immagine torna, lo schermo spento resta spento e alla riaccensione l'immagine viene reinviata, una sorgente cancellata fa tornare l'orologio con `Mode = Clock`. Riavvio di HA: l'immagine di My media viene riletta dal disco dopo l'avvio. ACK e durate al §8. |
 
 ---
 
@@ -380,8 +407,10 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 | Un comando semplice non riceve ACK (V9) | Errori spuri | Verificato in M1: tutti lo ricevono, tranne `set_time`, che riceve una risposta e viene trattato come richiesta. |
 | pypixelcolor cambia i moduli interni | Rotture all'aggiornamento | Pin esatto e import confinati in `protocol.py`, coperti da `test_protocol.py` |
 | Il pannello non trasmette advertising da connesso (V4) | `Signal strength` fermo durante la connessione | Confermato in M1. Si accetta e si documenta (il sensore è disattivato di default) |
-| Ripristino a ogni avvio di HA | Una GIF viene ritrasmessa a ogni riavvio, qualche secondo di trasferimento | Accettato: garantisce la coerenza (F9) |
-| URL esterni non più raggiungibili al ripristino | L'immagine non torna | Ripiego sull'orologio (F9.4), già deciso |
-| ACK duplicati o in ritardo (visti in M2 con i client caduti non chiusi, ora risolto) | Nei trasferimenti a finestre di M4, un ACK in più potrebbe far partire la finestra successiva troppo presto | In M4 valutare di accettare solo gli ACK che ripetono i byte 2–3 del comando (V9) |
-| Proxy ESPHome con WiFi instabile (visto in M2) | ACK lenti, scritture in timeout dopo 30 s, connessione che cade | L'errore compare nell'interfaccia (`command_failed`). Alla caduta della connessione segue la riconnessione con il ripristino, che riallinea il pannello allo stato di HA. |
+| Ripristino a ogni avvio di HA | Una GIF viene ritrasmessa a ogni riavvio: fino a circa 25 s per una GIF da 60 KB tramite l'adattatore USB | Accettato: garantisce la coerenza (F9). Durante l'avvio l'immagine segue in background (§4.3) e nel frattempo il player è in buffering. |
+| URL esterni non più raggiungibili al ripristino | L'immagine non torna | Ripiego sull'orologio (F9.4), verificato in M4 con un file cancellato |
+| Siti che rifiutano la sessione di HA (Wikimedia risponde 429 al suo User-Agent) | Un URL che funziona nel browser fallisce in HA | L'errore è visibile con lo status HTTP. Si accetta: lo User-Agent è quello di HA. |
+| ACK duplicati o in ritardo (visti in M2 con i client caduti non chiusi, ora risolto) | Nei trasferimenti a finestre un ACK in più potrebbe far partire la finestra successiva troppo presto | Risolto in M4: si accettano solo gli ACK che ripetono i byte 2–3 della finestra (V9) |
+| GIF che il pannello non anima (V10) | La GIF resta ferma sul primo fotogramma | Risolto in M4: la tavola globale viene portata a 256 colori. Un aggiornamento di pypixelcolor va riverificato con una GIF di pochi colori. |
+| Proxy ESPHome con WiFi instabile (visto in M2) | ACK lenti, scritture in timeout dopo 30 s, connessione che cade. Per le immagini: una finestra da 12 KB richiede circa 5 s tramite l'adattatore USB, e tramite il proxy può superare gli 8 s di attesa dell'ACK | L'errore compare nell'interfaccia (`command_failed`). Alla caduta della connessione segue la riconnessione con il ripristino, che riallinea il pannello allo stato di HA. Se i trasferimenti tramite il proxy vanno in timeout, si allunga l'attesa per le sole finestre. |
 | Pannello e HA in competizione con l'app del telefono | Connessioni rubate | `Disconnect` spegne `Auto reconnect` (F3.6) |

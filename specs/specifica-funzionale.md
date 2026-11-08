@@ -243,7 +243,7 @@ Si mantengono due entità separate, entrambe in Controls:
 - **F8.6** *Play* rimanda l'ultima immagine. *Stop* torna all'orologio (§5.7).
 - **F8.7** **Nessuna copia dell'immagine**: l'integrazione ricorda solo la *sorgente* dell'ultima immagine, e la riscarica quando deve rimandarla (Play, `Mode` = `Image`, cambio di `Image fit`, ripristino dopo una riconnessione).
   - I file del Media browser funzionano sempre, perché l'integrazione ne ricorda il riferimento e non l'URL firmato, che scade.
-  - Se la sorgente non è più raggiungibile (URL temporaneo, file cancellato), un'azione dell'utente fallisce con un errore visibile. Il ripristino dopo una riconnessione mostra invece l'orologio (F9.4).
+  - Se la sorgente non è più raggiungibile (URL temporaneo, file cancellato), un'azione dell'utente che chiede l'immagine (Play, `Mode` = `Image`, cambio di `Image fit`) fallisce con un errore visibile. Il ripristino dopo una riconnessione mostra invece l'orologio (F9.4). Lo stesso vale quando l'immagine va rimandata solo per riaccendere lo schermo (`Power`, o la luminosità a schermo spento) dopo che il pannello ha perso la corrente: lo schermo si accende con l'orologio e `Mode` passa a `Clock`.
 - **F8.8** Un file più grande di 10 MB, un formato non supportato, un URL irraggiungibile o un trasferimento fallito producono un **errore visibile** nell'interfaccia (risolve P4).
 - **F8.9** Ultima immagine e stato del player sopravvivono ai riavvii di HA.
 - **F8.10** Un trasferimento in corso non viene interrotto. I comandi arrivati nel frattempo (per esempio la luminosità) vengono eseguiti subito dopo.
@@ -387,6 +387,9 @@ Nessuna di queste prove cambia le funzionalità decise: servono solo a rifinire 
 | V7 | La sincronizzazione dell'ora provoca sfarfallii o ridisegna il contenuto? | Frequenza della sincronizzazione (F6.5) |
 | V8 | Cosa fanno i 4 valori di orientamento? Cambiarlo ridisegna subito il contenuto visibile? | Nomi delle opzioni di `Orientation` (F11.1) |
 | V9 | Anche i comandi semplici (accensione, luminosità, orientamento, ora) ricevono una conferma dal pannello? | Affidabilità degli errori visibili (T2), vedi il piano tecnico |
+| V10 | Perché una GIF con pochi colori resta ferma sul primo fotogramma? Emersa nelle prove di M4 | F8.3 |
+| V11 | Dopo uno spegnimento e una riaccensione da comando, il pannello mostra ancora l'immagine? | Quando la riaccensione deve rimandare l'immagine (F5.3, F8.7) |
+| V12 | La sincronizzazione dell'ora sostituisce un'immagine con l'orologio? | Sincronizzazione con `Mode` = `Image` (F6.5) |
 
 ---
 
