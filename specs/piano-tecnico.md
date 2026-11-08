@@ -43,7 +43,7 @@ Valori letti dal codice sorgente di HA al tag `2026.10.0` e dal pacchetto pypixe
 | Generazione degli entity_id | Nome inglese, preceduto dal nome del dispositivo e, se il dispositivo ha già un'area quando le entità vengono create, dall'area | Spiega `binary_sensor.taverna_pixel_led_display_connected` nel riferimento. Non impostiamo un'area suggerita, così gli id restano `<device>_<entity>` come nel §6 della specifica. |
 | `media_source.PlayMedia` | Ha `url`, `mime_type` e `path` | I file locali si leggono da disco, senza passare dall'HTTP |
 | `MediaPlayerState.BUFFERING` | Esiste | F8.5 |
-| Icone del marchio | Il loader riconosce una cartella `brand/` nell'integrazione | Icona e logo direttamente nel repository (M5) |
+| Icone del marchio | Il loader riconosce una cartella `brand/` nell'integrazione. Il componente `brands` serve solo `icon.png`, `logo.png`, le varianti `@2x` e le varianti `dark_`, senza controllare le dimensioni, e ricade su `icon.png` per quelle mancanti | Bastano `icon.png` (256×256) e `icon@2x.png` (512×512), con le dimensioni del repository `home-assistant/brands`. La validazione HACS `brands` cerca `brand/icon.png` nell'albero del repository (M5) |
 | Libreria di test | `pytest-homeassistant-custom-component==0.13.371` usa `homeassistant==2026.10.0` | Test sulla versione minima supportata |
 
 ---
@@ -121,7 +121,7 @@ class DisplayState:
 
 | Evento | Azione |
 |---|---|
-| Advertisement ricevuto (`async_register_advertisement_callback`) | Solo se connettibile: `reachable = True`, aggiorna l'RSSI (al massimo una scrittura ogni 30 s, oppure se varia di almeno 3 dBm). Se non è connesso, `auto_reconnect` è attivo, non è in pausa e non c'è un tentativo in corso, avvia la riconnessione in background. |
+| Advertisement ricevuto (`async_register_advertisement_callback`) | Solo se connettibile: `reachable = True`, aggiorna l'RSSI (al massimo una scrittura ogni 30 s, vedi sotto). Se non è connesso, `auto_reconnect` è attivo, non è in pausa e non c'è un tentativo in corso, avvia la riconnessione in background. |
 | `async_track_unavailable` | `reachable = False` |
 | Disconnessione, voluta o no | `reachable = async_address_present(…)`: mentre era connesso il pannello non trasmetteva (V4), quindi il manager Bluetooth può averlo già dimenticato |
 | Tentativo fallito, in background o da un comando | Pausa di 30 s (F3.3) per i soli tentativi in background: un comando si connette comunque |
@@ -129,6 +129,12 @@ class DisplayState:
 | `Auto reconnect` riattivato | Se il pannello è presente, tentativo immediato (F3.5) |
 | `Disconnect` | `auto_reconnect = False` (salvato), poi disconnessione voluta (F3.6) |
 | Avvio dell'entry | Nessuna connessione bloccante (risolve P5): se `auto_reconnect` è attivo e il pannello è presente, primo tentativo esplicito in background |
+
+**`Signal strength`** (F10.3):
+- **Limite di scrittura**: una scrittura ogni 30 s al massimo, con il valore più forte sentito nell'intervallo. La prima regola prevista, "o se varia di almeno 3 dBm", è stata provata sul pannello e scartata: l'RSSI oscilla di 5–6 dBm da un advertisement all'altro (−67/−72), quindi scriveva circa due volte al secondo.
+- **Quale scanner conta**: il callback si attiva una volta per ogni scanner che sente il pannello. Conta il più forte dell'intervallo, qualunque scanner l'abbia sentito: è il percorso che HA sceglierebbe per connettersi. Gli scanner non connettibili non contano.
+- **Da connesso**: resta l'ultimo valore noto, cioè quello di subito prima della connessione. Il pannello non trasmette (V4), e con `unknown` il sensore non avrebbe un valore quasi mai, mentre serve proprio a capire se il pannello è al limite della portata.
+- **All'avvio di HA** il valore iniziale viene dalla cronologia Bluetooth di HA (`async_last_service_info`): il callback non fa replay, e il pannello smette di trasmettere appena connesso.
 
 La disponibilità delle entità di controllo è `connected or reachable` (T1): mentre è connesso conta solo la connessione, perché il manager Bluetooth prima o poi dimentica un pannello che non trasmette (V4). `Connected` e le entità di configurazione e diagnostica sono sempre disponibili: la regola si basa sulla categoria dell'entità.
 
@@ -234,7 +240,7 @@ Tutti i testi stanno in `translations/en.json`, che è l'unico file di testi: ni
 | `disconnect` | button | config | |
 | `connected` | binary_sensor | diagnostic | device_class `connectivity` |
 | `width`, `height` | sensor | diagnostic | Unità `px`, valori da `entry.data` |
-| `signal_strength` | sensor | diagnostic | device_class `signal_strength`, dBm, `state_class` measurement, disattivata di default |
+| `signal_strength` | sensor | diagnostic | device_class `signal_strength`, dBm, `state_class` measurement, disattivata di default. Da connesso mostra l'ultimo valore noto (§4.2) |
 
 Le piattaforme dichiarano `PARALLEL_UPDATES = 0`, perché la serializzazione la fa già il controller.
 
@@ -280,11 +286,14 @@ Le piattaforme dichiarano `PARALLEL_UPDATES = 0`, perché la serializzazione la 
 `async_get_config_entry_diagnostics` restituisce:
 - `entry.data`;
 - lo stato voluto completo;
-- lo stato della connessione: connesso, raggiungibile, ultima connessione e ultima disconnessione, ultimo errore;
+- lo stato della connessione: connesso, raggiungibile, ultima connessione e ultima disconnessione, ultimo errore, adattatore o proxy dell'ultima connessione;
+- l'RSSI di `Signal strength`, anche se il sensore è disattivato;
 - l'ultimo `BluetoothServiceInfo`: RSSI, source (adattatore o proxy), connettibile;
 - il testo di `async_address_reachability_diagnostics(…, CONNECTION)`.
 
-Con `async_redact_data` si oscura la query string degli URL delle immagini, che può contenere token.
+La query string degli URL delle immagini, che può contenere token, si oscura con `image_source.redact_url`.
+
+**Adattatore o proxy della connessione**: da connesso l'ultimo advertisement non lo dice (V4), e HA sceglie da solo il percorso fra gli scanner che sentono il pannello. HA non ha un'API pubblica per chiederlo, quindi `IPixelConnection.adapter` legge l'attributo privato `_connected_scanner` di `HaBleakClientWrapper`. Se l'attributo sparisse il dato diventerebbe `None`, senza errori, e `test_connection.py` lo segnalerebbe all'aggiornamento di HA. Il controller lo copia a ogni connessione, così resta leggibile dopo una disconnessione.
 
 ---
 
@@ -333,6 +342,12 @@ I log usano `debug` per il traffico e `warning` per le disconnessioni inattese e
   - log e registri si leggono via SSH;
   - stati delle entità, azioni e config flow passano dall'API REST, con un token salvato fuori dal repository;
   - le verifiche visive sul pannello e le interruzioni di corrente le fai tu.
+
+### Rilascio
+
+- **HACS scarica il tag così com'è**, senza zip allegato: sono una ventina di file piccoli, e uno zip richiederebbe un workflow in più da mantenere.
+- **La versione** di `manifest.json` coincide con il tag (`0.1.0` e `v0.1.0`).
+- **Installazione pulita sul tuo HA**: la config entry viene rimossa e riaggiunta, per provare il percorso di un nuovo utente. Il dispositivo resta senza area finché tutte le entità non esistono.
 
 ### Struttura del repository
 
@@ -406,7 +421,8 @@ Ogni milestone termina con test verdi, deploy sul tuo HA e una prova reale.
 |---|---|---|
 | Un comando semplice non riceve ACK (V9) | Errori spuri | Verificato in M1: tutti lo ricevono, tranne `set_time`, che riceve una risposta e viene trattato come richiesta. |
 | pypixelcolor cambia i moduli interni | Rotture all'aggiornamento | Pin esatto e import confinati in `protocol.py`, coperti da `test_protocol.py` |
-| Il pannello non trasmette advertising da connesso (V4) | `Signal strength` fermo durante la connessione | Confermato in M1. Si accetta e si documenta (il sensore è disattivato di default) |
+| Il pannello non trasmette advertising da connesso (V4) | `Signal strength` fermo durante la connessione | Confermato in M1. Da connesso il sensore mostra l'ultimo valore noto (§4.2). Si accetta e si documenta nel README (il sensore è disattivato di default) |
+| `_connected_scanner` è un attributo privato di habluetooth | Un aggiornamento di HA può toglierlo | La diagnostica mostra `adapter: null`, senza errori. `test_connection.py` fallisce quando si aggiorna il pin di HA. |
 | Ripristino a ogni avvio di HA | Una GIF viene ritrasmessa a ogni riavvio: fino a circa 25 s per una GIF da 60 KB tramite l'adattatore USB | Accettato: garantisce la coerenza (F9). Durante l'avvio l'immagine segue in background (§4.3) e nel frattempo il player è in buffering. |
 | URL esterni non più raggiungibili al ripristino | L'immagine non torna | Ripiego sull'orologio (F9.4), verificato in M4 con un file cancellato |
 | Siti che rifiutano la sessione di HA (Wikimedia risponde 429 al suo User-Agent) | Un URL che funziona nel browser fallisce in HA | L'errore è visibile con lo status HTTP. Si accetta: lo User-Agent è quello di HA. |

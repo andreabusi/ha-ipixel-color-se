@@ -54,7 +54,7 @@ docker run --rm --platform linux/amd64 -v "$PWD":/github/workspace ghcr.io/home-
 - `tests/snapshots/` holds the syrupy snapshots. After a deliberate change, regenerate them with `uv run pytest --snapshot-update` and review the diff.
 - Ruff excludes `specs/`, because it would reformat the code blocks in the Markdown documents.
 - The hassfest image is amd64 only: on Apple Silicon it runs emulated.
-- CI (`.github/workflows/ci.yml`) runs ruff and pytest, hassfest, and the HACS validation. The HACS check `brands` is ignored until the `brand/` folder arrives in M5. HACS also checks the GitHub repository's description and topics.
+- CI (`.github/workflows/ci.yml`) runs ruff and pytest, hassfest, and the HACS validation, with no check ignored. The HACS check `brands` looks for `custom_components/ipixel_color_se/brand/icon.png` in the repository tree. HACS also checks the GitHub repository's description and topics.
 
 ### Deploying to the user's Home Assistant
 
