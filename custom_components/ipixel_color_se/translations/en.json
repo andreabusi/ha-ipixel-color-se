@@ -61,6 +61,11 @@
         "name": "Disconnect"
       }
     },
+    "media_player": {
+      "image_player": {
+        "name": "Image player"
+      }
+    },
     "number": {
       "brightness": {
         "name": "Brightness"
@@ -70,7 +75,8 @@
       "mode": {
         "name": "Mode",
         "state": {
-          "clock": "Clock"
+          "clock": "Clock",
+          "image": "Image"
         }
       },
       "clock_style": {
@@ -84,6 +90,13 @@
           "frame_multicolor": "Frame, multicolor",
           "hourglass_yellow": "Hourglass, yellow",
           "hourglass_orange": "Hourglass, orange"
+        }
+      },
+      "image_fit": {
+        "name": "Image fit",
+        "state": {
+          "fill": "Fill",
+          "fit": "Fit"
         }
       },
       "orientation": {
@@ -125,6 +138,18 @@
     },
     "command_failed": {
       "message": "{name} didn't accept the command: {error}"
+    },
+    "no_image": {
+      "message": "{name} has no image to show yet. Play one with the image player first"
+    },
+    "image_too_large": {
+      "message": "The image {source} is larger than {limit} MB"
+    },
+    "image_unsupported": {
+      "message": "{source} isn't an image the display can show. Use a GIF, PNG, JPEG, WebP or BMP file"
+    },
+    "image_unavailable": {
+      "message": "Can't read the image {source}: {error}"
     }
   }
 }

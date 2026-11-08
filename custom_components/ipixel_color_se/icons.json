@@ -8,6 +8,11 @@
         "default": "mdi:bluetooth-off"
       }
     },
+    "media_player": {
+      "image_player": {
+        "default": "mdi:image-multiple"
+      }
+    },
     "number": {
       "brightness": {
         "default": "mdi:brightness-6"
@@ -17,11 +22,18 @@
       "mode": {
         "default": "mdi:monitor",
         "state": {
-          "clock": "mdi:clock-outline"
+          "clock": "mdi:clock-outline",
+          "image": "mdi:image"
         }
       },
       "clock_style": {
         "default": "mdi:clock-digital"
+      },
+      "image_fit": {
+        "default": "mdi:fit-to-page-outline",
+        "state": {
+          "fill": "mdi:crop"
+        }
       },
       "orientation": {
         "default": "mdi:screen-rotation"

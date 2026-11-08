@@ -1,14 +1,22 @@
 """Tests for the controller: state rules, reconnection, restore and errors."""
 
 import asyncio
+from collections.abc import Callable
 import dataclasses
 from datetime import timedelta
+from pathlib import Path
 
 from bleak.exc import BleakError
 from freezegun.api import FrozenDateTimeFactory
-from homeassistant.const import STATE_OFF, STATE_ON, STATE_UNAVAILABLE, STATE_UNKNOWN
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.const import (
+    EVENT_HOMEASSISTANT_STARTED,
+    STATE_OFF,
+    STATE_ON,
+    STATE_UNAVAILABLE,
+    STATE_UNKNOWN,
+)
+from homeassistant.core import CoreState, HomeAssistant
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.util import dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import (
@@ -22,13 +30,29 @@ from custom_components.ipixel_color_se.controller import (
     RECONNECT_COOLDOWN,
     IPixelController,
 )
-from custom_components.ipixel_color_se.state import ClockSettings, DisplayState, Mode
+from custom_components.ipixel_color_se.state import (
+    ClockSettings,
+    DisplayState,
+    ImageFit,
+    ImageRef,
+    Mode,
+)
 
-from .common import FakePanel, ack, describe, panel_date, panel_time
+from .common import (
+    FakePanel,
+    ack,
+    describe,
+    gif,
+    noise_gif,
+    panel_date,
+    panel_time,
+    still,
+)
 from .test_init import setup_entry
 
 CONNECTED = "binary_sensor.kitchen_pixel_connected"
 POWER = "switch.kitchen_pixel_power"
+PLAYER = "media_player.kitchen_pixel_image_player"
 AUTO_RECONNECT = "switch.kitchen_pixel_auto_reconnect"
 ORIENTATION = "select.kitchen_pixel_orientation"
 MODE = "select.kitchen_pixel_mode"
@@ -38,6 +62,10 @@ CLOCK_STYLE = "select.kitchen_pixel_clock_style"
 DEFAULT_RESTORE = ["set_time", "orientation 0", "power on"]
 # The clock with the default options
 CLOCK = "clock 1 24h date"
+
+CAT = ImageRef(media_id="/local/cat.gif", title="cat.gif")
+# The image is the content, on the screen or not
+SHOWING_CAT = DisplayState(mode=Mode.IMAGE, image=CAT)
 
 
 def store_key(entry: MockConfigEntry) -> str:
@@ -78,6 +106,24 @@ async def fire_at(
 def ignore(name: str, panel: FakePanel) -> object:
     """Return a responder that doesn't answer the commands named name."""
     return lambda data: [] if describe(data).startswith(name) else panel.answer(data)
+
+
+async def wait_for(condition: Callable[[], bool]) -> None:
+    """Wait until condition holds, letting the executor work meanwhile.
+
+    Polls: what the condition waits for has no event to wait on.
+    """
+    async with asyncio.timeout(5):
+        while not condition():  # noqa: ASYNC110
+            await asyncio.sleep(0.005)
+
+
+@pytest.fixture
+def cat(config_dir: Path) -> Path:
+    """Put a GIF in www, at /local/cat.gif."""
+    path = config_dir / "www" / "cat.gif"
+    path.write_bytes(gif())
+    return path
 
 
 @pytest.fixture
@@ -954,3 +1000,423 @@ async def test_unavailable_once_hass_forgets_the_panel(
     mock_panel.vanish()
     await hass.async_block_till_done()
     assert hass.states.get(POWER).state == STATE_UNAVAILABLE
+
+
+# Images (F7.2, F8, F9.4)
+
+
+@pytest.mark.usefixtures("cat")
+async def test_play_media(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """An image becomes the content and turns the screen on (F5.3); its source is saved."""
+    controller = await start(hass, mock_config_entry)
+    await controller.async_set_power(False)
+    mock_panel.writes.clear()
+
+    await controller.async_play_media(CAT.media_id)
+
+    assert mock_panel.commands == ["gif"]
+    assert mock_panel.screen_on
+    assert controller.state == dataclasses.replace(SHOWING_CAT, power=True)
+    assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+    assert hass_storage[store_key(mock_config_entry)]["data"]["image"] == {
+        "media_id": "/local/cat.gif",
+        "title": "cat.gif",
+    }
+
+
+async def test_large_images_go_in_windows(
+    hass: HomeAssistant,
+    config_dir: Path,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Each 12 KB window waits for its ACK, the last one for the end of the transfer."""
+    (config_dir / "www" / "noise.gif").write_bytes(noise_gif(20))
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+
+    await controller.async_play_media("/local/noise.gif")
+
+    assert mock_panel.commands[0] == "gif"
+    assert set(mock_panel.commands[1:]) == {"gif, continued"}
+    assert len(mock_panel.commands) > 2
+    assert mock_panel.shown.n_frames == 20
+
+
+async def test_show_image_without_one(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Mode Image before any image asks to play one first (F7.2)."""
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+
+    with pytest.raises(ServiceValidationError) as err:
+        await controller.async_show_image()
+
+    assert err.value.translation_key == "no_image"
+    assert mock_panel.writes == []
+
+
+@pytest.mark.usefixtures("cat")
+async def test_show_image_reads_it_again(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Mode Image shows the last image, read again from its source (F8.7)."""
+    save_state(
+        hass_storage, mock_config_entry, DisplayState(mode=Mode.CLOCK, image=CAT)
+    )
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+
+    await controller.async_show_image()
+
+    assert mock_panel.commands == ["gif"]
+    assert controller.state.mode is Mode.IMAGE
+
+
+@pytest.mark.parametrize(
+    ("power", "content"), [(True, "gif"), (False, "power off")], ids=["on", "off"]
+)
+@pytest.mark.usefixtures("cat")
+async def test_restore_shows_the_image(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    power: bool,
+    content: str,
+) -> None:
+    """The image comes back, read again from its source; off stays off (F9.4)."""
+    save_state(
+        hass_storage, mock_config_entry, dataclasses.replace(SHOWING_CAT, power=power)
+    )
+
+    await start(hass, mock_config_entry)
+
+    assert mock_panel.commands == ["set_time", "orientation 0", content]
+    assert mock_panel.screen_on is power
+
+
+async def test_restore_falls_back_to_the_clock(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    config_dir: Path,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If the image can't be read any more, the clock comes back instead (F9.4)."""
+    save_state(hass_storage, mock_config_entry, SHOWING_CAT)
+
+    controller = await start(hass, mock_config_entry)
+
+    assert mock_panel.commands == ["set_time", "orientation 0", CLOCK]
+    assert controller.state.mode is Mode.CLOCK
+    # Kept, for Play
+    assert controller.state.image == CAT
+    assert hass.states.get(PLAYER).state == "idle"
+    assert "Can't show the image cat.gif on AA:BB:CC:DD:EE:FF" in caplog.text
+
+
+@pytest.mark.usefixtures("cat")
+async def test_restore_waits_for_ha_to_start(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """While HA starts, media sources may not work yet: the image follows the start."""
+    save_state(hass_storage, mock_config_entry, SHOWING_CAT)
+    hass.set_state(CoreState.starting)
+
+    await start(hass, mock_config_entry)
+    assert mock_panel.commands == ["set_time", "orientation 0", "power on"]
+
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await settle(hass)
+
+    assert mock_panel.commands == ["set_time", "orientation 0", "power on", "gif"]
+
+
+@pytest.mark.usefixtures("cat")
+async def test_power_cycle_brings_the_image_back(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """After a power cycle the image is back, not the built-in GIFs (F9.4)."""
+    controller = await start(hass, mock_config_entry)
+    await controller.async_play_media(CAT.media_id)
+
+    mock_panel.lose_power()
+    await hass.async_block_till_done()
+    mock_panel.writes.clear()
+    mock_panel.image = None
+    mock_panel.power_on()
+    await settle(hass)
+
+    assert mock_panel.commands == ["set_time", "orientation 0", "gif"]
+    assert mock_panel.image is not None
+
+
+@pytest.mark.usefixtures("cat")
+async def test_power_on_keeps_the_image(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """The panel keeps the image while the screen is off: on is enough."""
+    controller = await start(hass, mock_config_entry)
+    await controller.async_play_media(CAT.media_id)
+    mock_panel.writes.clear()
+
+    await controller.async_set_power(False)
+    await controller.async_set_power(True)
+
+    assert mock_panel.commands == ["power off", "power on"]
+    assert hass.states.get(PLAYER).state == "playing"
+
+
+@pytest.mark.usefixtures("cat")
+async def test_power_on_after_a_power_cycle_sends_the_image(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """A power cycle with the screen off loses the image: on sends it again."""
+    controller = await start(hass, mock_config_entry)
+    await controller.async_play_media(CAT.media_id)
+    await controller.async_set_power(False)
+
+    mock_panel.lose_power()
+    await hass.async_block_till_done()
+    mock_panel.writes.clear()
+    mock_panel.power_on()
+    await settle(hass)
+    assert mock_panel.commands == ["set_time", "orientation 0", "power off"]
+    assert not mock_panel.screen_on
+
+    mock_panel.writes.clear()
+    await controller.async_set_power(True)
+
+    assert mock_panel.commands == ["gif"]
+    assert mock_panel.screen_on
+
+
+@pytest.mark.parametrize(
+    ("command", "sent"),
+    [
+        (lambda controller: controller.async_set_brightness(40), "brightness 40"),
+        (lambda controller: controller.async_set_orientation(2), "orientation 2"),
+    ],
+)
+@pytest.mark.usefixtures("cat")
+async def test_waking_the_screen_shows_the_image(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    command: Callable,
+    sent: str,
+) -> None:
+    """Woken by brightness or orientation (check V1), the panel gets the image it lacks."""
+    save_state(
+        hass_storage, mock_config_entry, dataclasses.replace(SHOWING_CAT, power=False)
+    )
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+
+    await command(controller)
+    assert mock_panel.commands == [sent, "gif"]
+    assert controller.state.power
+
+    # The panel has it now, and keeps it while the screen is off
+    await controller.async_set_power(False)
+    mock_panel.writes.clear()
+    await command(controller)
+    assert mock_panel.commands == [sent]
+
+
+async def test_power_on_falls_back_to_the_clock(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    config_dir: Path,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Turning on with an image that's gone shows the clock, as the restore does."""
+    save_state(
+        hass_storage, mock_config_entry, dataclasses.replace(SHOWING_CAT, power=False)
+    )
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+
+    await controller.async_set_power(True)
+
+    assert mock_panel.commands == ["set_time", CLOCK]
+    assert controller.state.mode is Mode.CLOCK
+    assert controller.state.power
+
+
+async def test_image_fit_sends_the_image_shown_again(
+    hass: HomeAssistant,
+    config_dir: Path,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """While the image is shown, a new fit sends it again at once (F8.4)."""
+    (config_dir / "www" / "wide.png").write_bytes(still("PNG", (64, 32)))
+    controller = await start(hass, mock_config_entry)
+    await controller.async_play_media("/local/wide.png")
+    assert mock_panel.shown.convert("RGB").getpixel((0, 0)) == (0, 255, 0)
+    mock_panel.writes.clear()
+
+    await controller.async_set_image_fit(ImageFit.FIT)
+
+    assert mock_panel.commands == ["png"]
+    assert mock_panel.shown.convert("RGB").getpixel((0, 0)) == (0, 0, 0)
+
+    # The panel has it already
+    mock_panel.writes.clear()
+    await controller.async_set_image_fit(ImageFit.FIT)
+    assert mock_panel.commands == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        DisplayState(mode=Mode.CLOCK, image=CAT),
+        dataclasses.replace(SHOWING_CAT, power=False),
+    ],
+    ids=["clock", "screen off"],
+)
+@pytest.mark.usefixtures("cat")
+async def test_image_fit_waits_while_the_image_is_hidden(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    state: DisplayState,
+) -> None:
+    """Hidden, the image isn't sent: it would replace the content or turn the screen on (D10)."""
+    save_state(hass_storage, mock_config_entry, state)
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+
+    await controller.async_set_image_fit(ImageFit.FIT)
+
+    assert mock_panel.commands == []
+    assert controller.state.image_fit is ImageFit.FIT
+
+
+@pytest.mark.usefixtures("cat")
+async def test_image_fit_waits_for_the_connection(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Disconnected, the fit is saved without connecting; the restore uses it."""
+    controller = await start(hass, mock_config_entry)
+    await controller.async_play_media(CAT.media_id)
+    mock_panel.lose_power()
+    await hass.async_block_till_done()
+    attempts = mock_panel.connect_attempts
+
+    await controller.async_set_image_fit(ImageFit.FIT)
+
+    assert mock_panel.connect_attempts == attempts
+    mock_panel.writes.clear()
+    mock_panel.power_on()
+    await settle(hass)
+    assert mock_panel.commands == ["set_time", "orientation 0", "gif"]
+
+
+async def test_image_fit_with_a_source_gone(
+    hass: HomeAssistant,
+    cat: Path,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """If the image can't be read any more, the error shows; the fit is kept."""
+    controller = await start(hass, mock_config_entry)
+    await controller.async_play_media(CAT.media_id)
+    await hass.async_add_executor_job(cat.unlink)
+    mock_panel.writes.clear()
+
+    with pytest.raises(HomeAssistantError) as err:
+        await controller.async_set_image_fit(ImageFit.FIT)
+
+    assert err.value.translation_key == "image_unavailable"
+    assert controller.state.image_fit is ImageFit.FIT
+    assert controller.state.mode is Mode.IMAGE
+    assert mock_panel.writes == []
+
+
+@pytest.mark.usefixtures("cat")
+async def test_commands_wait_for_a_transfer(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """A brightness change during a transfer goes right after it, without breaking it (F8.10)."""
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+    loop = asyncio.get_running_loop()
+
+    def slow_window(data: bytes) -> list[bytes]:
+        if describe(data) == "gif":
+            status = mock_panel.receive_window(data)
+            loop.call_later(0.05, mock_panel.client.notify, ack(data, status))
+            return []
+        return mock_panel.answer(data)
+
+    mock_panel.responder = slow_window
+    play = asyncio.create_task(controller.async_play_media(CAT.media_id))
+    await wait_for(lambda: mock_panel.commands == ["gif"])
+    assert hass.states.get(PLAYER).state == "buffering"
+
+    await controller.async_set_brightness(40)
+
+    assert mock_panel.commands == ["gif", "brightness 40"]
+    await play
+    assert controller.state.mode is Mode.IMAGE
+
+
+@pytest.mark.usefixtures("cat", "no_ack_wait")
+async def test_failed_transfer_keeps_the_state(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """An image the panel doesn't acknowledge is a command error; nothing changes."""
+    controller = await start(hass, mock_config_entry)
+    mock_panel.responder = ignore("gif", mock_panel)
+
+    with pytest.raises(HomeAssistantError) as err:
+        await controller.async_play_media(CAT.media_id)
+
+    assert err.value.translation_key == "command_failed"
+    assert controller.state == DisplayState()
+    assert hass.states.get(PLAYER).state == "idle"
+
+
+async def test_media_source_image_survives_a_restart(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    config_dir: Path,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """A Media browser image comes back after a restart: its id is kept, not its URL."""
+    (config_dir / "media" / "cat.gif").write_bytes(gif())
+    controller = await start(hass, mock_config_entry)
+    await controller.async_play_media(
+        "media-source://media_source/local/cat.gif", PLAYER
+    )
+
+    assert await hass.config_entries.async_reload(mock_config_entry.entry_id)
+    mock_panel.writes.clear()
+    await settle(hass)
+
+    assert hass_storage[store_key(mock_config_entry)]["data"]["image"] == {
+        "media_id": "media-source://media_source/local/cat.gif",
+        "title": "cat.gif",
+    }
+    assert mock_panel.commands == ["set_time", "orientation 0", "gif"]

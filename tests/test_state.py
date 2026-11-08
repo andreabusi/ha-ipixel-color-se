@@ -74,6 +74,7 @@ def test_missing_values_get_their_default() -> None:
         {"clock": "style_1"},
         {"image_fit": "stretch"},
         {"image": {"title": "no media_id"}},
+        {"image": {"media_id": 42}},
         {"image": "cat.gif"},
         {"auto_reconnect": None},
     ],
@@ -81,3 +82,12 @@ def test_missing_values_get_their_default() -> None:
 def test_invalid_values_get_their_default(data: dict) -> None:
     """A damaged file doesn't break the setup."""
     assert DisplayState.from_dict(data) == DisplayState()
+
+
+def test_image_without_a_title() -> None:
+    """An image saved without a valid title keeps its source."""
+    state = DisplayState.from_dict(
+        {"image": {"media_id": "/local/cat.gif", "title": 3}}
+    )
+
+    assert state.image == ImageRef(media_id="/local/cat.gif", title=None)

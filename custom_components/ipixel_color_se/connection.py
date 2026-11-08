@@ -8,6 +8,7 @@ work.
 import asyncio
 from collections.abc import Callable
 import logging
+from time import monotonic
 
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
@@ -162,17 +163,32 @@ class IPixelConnection:
             self._frames = frames = asyncio.Queue()
             try:
                 _LOGGER.debug("Sending %s to %s", plan.name, self._address)
+                started = monotonic()
                 status: int | None = None
                 for window in plan.windows:
                     self._discard_stale(frames)
                     await self._async_write(client, window.data, plan.chunk_size)
                     if window.ack:
-                        status = await self._async_wait_ack(frames, plan.name)
+                        status = await self._async_wait_ack(
+                            frames, plan.name, window.data
+                        )
                 if plan.final_ack and status != ACK_DONE_STATUS:
-                    await self._async_wait_ack(frames, plan.name, done=True)
+                    await self._async_wait_ack(
+                        frames, plan.name, plan.windows[-1].data, done=True
+                    )
+                response = None
                 if plan.response:
-                    return await self._async_wait_response(frames, plan.name)
-                return None
+                    response = await self._async_wait_response(frames, plan.name)
+                if len(plan.windows) > 1 or plan.final_ack:
+                    _LOGGER.debug(
+                        "Sent %s to %s: %d bytes in %d windows, %.1f s",
+                        plan.name,
+                        self._address,
+                        sum(len(window.data) for window in plan.windows),
+                        len(plan.windows),
+                        monotonic() - started,
+                    )
+                return response
             finally:
                 self._frames = None
 
@@ -191,15 +207,24 @@ class IPixelConnection:
             ) from err
 
     async def _async_wait_ack(
-        self, frames: asyncio.Queue[bytes | None], name: str, *, done: bool = False
+        self,
+        frames: asyncio.Queue[bytes | None],
+        name: str,
+        window: bytes,
+        *,
+        done: bool = False,
     ) -> int:
-        """Wait for a window ACK, or for the end-of-transfer ACK if done."""
+        """Wait for a window ACK, or for the end-of-transfer ACK if done.
+
+        Only an ACK that echoes the window's command counts: a late ACK of
+        another command can't let the next window go too early.
+        """
         wanted = {ACK_DONE_STATUS} if done else {*ACK_WINDOW_STATUSES, ACK_DONE_STATUS}
         try:
             async with asyncio.timeout(ACK_TIMEOUT):
                 while True:
                     frame = await self._async_next_frame(frames)
-                    if (status := ack_status(frame)) in wanted:
+                    if (status := ack_status(frame, window)) in wanted:
                         return status
                     _LOGGER.debug("Ignored %s while waiting for an ACK", frame.hex(" "))
         except TimeoutError as err:

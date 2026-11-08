@@ -1,8 +1,10 @@
 """Fixtures for the iPixel Color SE tests."""
 
 from collections.abc import Generator
+from pathlib import Path
 from unittest.mock import patch
 
+from homeassistant.core import HomeAssistant
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 from pytest_homeassistant_custom_component.syrupy import (
@@ -72,3 +74,17 @@ def mock_config_entry() -> MockConfigEntry:
     return MockConfigEntry(
         domain=DOMAIN, title=NAME, unique_id=ADDRESS, data=ENTRY_DATA
     )
+
+
+@pytest.fixture
+def config_dir(hass: HomeAssistant, tmp_path: Path) -> Path:
+    """Give HA a config folder of its own, with www and media folders.
+
+    www is served at /local/, media is "My media" in the Media browser. Set
+    up the integration after this fixture: media sources read media_dirs then.
+    """
+    hass.config.config_dir = str(tmp_path)
+    (tmp_path / "www").mkdir()
+    (tmp_path / "media").mkdir()
+    hass.config.media_dirs = {"local": str(tmp_path / "media")}
+    return tmp_path

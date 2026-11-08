@@ -1,8 +1,8 @@
 """Controller of one iPixel display: desired state, connection and restore."""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import asynccontextmanager, contextmanager, suppress
 import dataclasses
 from datetime import datetime
 from functools import partial
@@ -19,16 +19,18 @@ from homeassistant.components.bluetooth import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from . import protocol
+from . import image_source, protocol
 from .connection import IPixelConnection, IPixelError
 from .const import CONF_DEVICE_TYPE, CONF_HEIGHT, CONF_WIDTH, DOMAIN
+from .image_source import ImageData
 from .protocol import PanelInfo, SendPlan
-from .state import DisplayState, Mode
+from .state import DisplayState, ImageFit, ImageRef, Mode
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -98,6 +100,11 @@ class IPixelController:
         self._needs_restore = False
         self._lost = False
         self._stopped = False
+        self._hass_started = False
+        # Image transfers in progress, including reading the image
+        self._transfers = 0
+        # The image and fit the panel got on this connection, if it shows one
+        self._image_sent: tuple[str, ImageFit] | None = None
 
     @property
     def connected(self) -> bool:
@@ -117,6 +124,33 @@ class IPixelController:
     def clock_shown(self) -> bool:
         """Return whether the panel should be showing the clock right now."""
         return self.state.mode is Mode.CLOCK and self.state.power
+
+    @property
+    def image_shown(self) -> bool:
+        """Return whether the panel should be showing the image right now."""
+        return (
+            self.state.mode is Mode.IMAGE
+            and self.state.image is not None
+            and self.state.power
+        )
+
+    @property
+    def buffering(self) -> bool:
+        """Return whether an image is being read or sent to the panel."""
+        return self._transfers > 0
+
+    @property
+    def _image_on_panel(self) -> bool:
+        """Return whether the panel got the image, with its fit, on this connection.
+
+        The panel keeps it while the screen is off, but loses it without
+        power: a power cycle boots it on its built-in GIFs.
+        """
+        image = self.state.image
+        return image is not None and self._image_sent == (
+            image.media_id,
+            self.state.image_fit,
+        )
 
     @callback
     def async_add_listener(self, update_callback: CALLBACK_TYPE) -> Callable[[], None]:
@@ -143,6 +177,8 @@ class IPixelController:
         first attempt is made here.
         """
         self._unsubscribers = [
+            # Before the first connection: it runs at once if HA is running
+            async_at_started(self.hass, self._async_hass_started),
             async_register_advertisement_callback(
                 self.hass, self._async_advertisement, self.address
             ),
@@ -201,7 +237,7 @@ class IPixelController:
         """
         async with self._async_operation():
             await self._connection.async_send(protocol.brightness(level))
-            await self._async_refresh_woken_clock()
+            await self._async_refresh_woken_content()
             self._async_update(brightness=level, power=True)
 
     async def async_set_orientation(self, value: int) -> None:
@@ -211,7 +247,7 @@ class IPixelController:
         """
         async with self._async_operation():
             await self._connection.async_send(protocol.orientation(value))
-            await self._async_refresh_woken_clock()
+            await self._async_refresh_woken_content()
             self._async_update(orientation=value, power=True)
 
     async def async_show_clock(self) -> None:
@@ -220,9 +256,66 @@ class IPixelController:
         The clock turns the screen on (F5.3), and set_time follows it.
         """
         async with self._async_operation():
+            self._image_sent = None
             await self._connection.async_send(self._clock_plan())
             await self._async_send_time()
             self._async_update(mode=Mode.CLOCK, power=True)
+
+    async def async_play_media(
+        self, media_id: str, entity_id: str | None = None
+    ) -> None:
+        """Show an image from a URL, a /local/ path or a media source (F8).
+
+        Only the media_id is kept, never the signed URL a media source
+        resolves to: the image is read again whenever it's shown (F8.7). The
+        image turns the screen on (F5.3). entity_id is the player that asked.
+        """
+        with self._buffering():
+            async with self._async_operation():
+                image = await self._async_send_image(media_id, entity_id)
+                self._async_update(
+                    image=ImageRef(media_id=media_id, title=image.title),
+                    mode=Mode.IMAGE,
+                    power=True,
+                )
+
+    async def async_show_image(self) -> None:
+        """Show the last image again, read from its source (F7.2, F8.6)."""
+        if (last := self.state.image) is None:
+            raise self._error("no_image", validation=True)
+        with self._buffering():
+            async with self._async_operation():
+                # The latest image, if one was played while waiting
+                media_id = (self.state.image or last).media_id
+                image = await self._async_send_image(media_id)
+                self._async_update(
+                    image=ImageRef(media_id=media_id, title=image.title),
+                    mode=Mode.IMAGE,
+                    power=True,
+                )
+
+    async def async_set_image_fit(self, fit: ImageFit) -> None:
+        """Choose how images are fitted to the panel (F8.4, D10).
+
+        Always saved, but the image is sent again only while it's shown and
+        the panel connected. Otherwise the next image, or showing this one
+        again, uses it.
+        """
+        self._async_update(image_fit=fit)
+        async with self._async_operation(connect=False) as connected:
+            image = self.state.image
+            if (
+                not connected
+                or image is None
+                or not self.image_shown
+                or self._image_on_panel
+            ):
+                return
+            try:
+                await self._async_send_image(image.media_id)
+            except IPixelError:
+                self._needs_restore = True
+                raise
 
     async def async_set_clock(self, **changes: Any) -> None:
         """Change the options of the clock (F6.3, D10).
@@ -346,12 +439,81 @@ class IPixelController:
         because set_time would turn it on (check V7). With no known content,
         the panel just turns the screen on, showing what it had.
         """
-        if self.state.mode is not Mode.CLOCK:
-            await self._connection.async_send(protocol.power(True))
-            return
+        match self.state.mode, self.state.image:
+            case Mode.IMAGE, ImageRef() as image:
+                await self._async_show_image_again(image, sync_time=sync_time)
+            case Mode.CLOCK, _:
+                await self._async_show_clock_content(sync_time=sync_time)
+            case _:
+                await self._connection.async_send(protocol.power(True))
+
+    async def _async_show_clock_content(self, *, sync_time: bool) -> None:
+        """Show the clock, after HA's time unless sync_time is False."""
+        self._image_sent = None
         if sync_time:
             await self._async_send_time()
         await self._connection.async_send(self._clock_plan())
+
+    async def _async_show_image_again(
+        self, image: ImageRef, *, sync_time: bool
+    ) -> None:
+        """Turn the screen on with the image, sending it if the panel lacks it.
+
+        The panel lacks it on a new connection: it may have lost power. If
+        the source can't be read any more, show the clock instead and make
+        it the mode (F9.4): the screen goes on as asked. While HA starts,
+        media sources and HA's own URLs may not work yet: the screen goes on
+        now, and the image follows once HA has started. Call with the lock
+        held.
+        """
+        if self._image_on_panel or not self._hass_started:
+            await self._connection.async_send(protocol.power(True))
+            return
+        try:
+            await self._async_send_image(image.media_id)
+        except HomeAssistantError as err:
+            # The image, not the panel: panel errors are IPixelErrors
+            _LOGGER.warning(
+                "Can't show the image %s on %s, showing the clock instead: %s",
+                image.title or image_source.redact_url(image.media_id, ""),
+                self.address,
+                err,
+            )
+            await self._async_show_clock_content(sync_time=sync_time)
+            self._async_update(mode=Mode.CLOCK)
+
+    async def _async_send_image(
+        self, media_id: str, entity_id: str | None = None
+    ) -> ImageData:
+        """Read an image, convert it with the current fit and send it.
+
+        Raise a translated error if the image can't be read or converted,
+        and IPixelError if the panel doesn't take it. Call with the lock held.
+        """
+        fit = self.state.image_fit
+        with self._buffering():
+            image = await image_source.async_resolve(self.hass, media_id, entity_id)
+            try:
+                plan = await self.hass.async_add_executor_job(
+                    protocol.image,
+                    image.data,
+                    fit,
+                    self.panel.width,
+                    self.panel.height,
+                )
+            except protocol.ImageError as err:
+                raise ServiceValidationError(
+                    translation_domain=DOMAIN,
+                    translation_key="image_unsupported",
+                    translation_placeholders={
+                        "source": image_source.redact_url(media_id, "")
+                    },
+                ) from err
+            # A transfer that fails halfway may leave anything on the panel
+            self._image_sent = None
+            await self._connection.async_send(plan)
+        self._image_sent = (media_id, fit)
+        return image
 
     def _clock_plan(self) -> SendPlan:
         """Return the command that shows the clock, with today's date in HA."""
@@ -374,14 +536,19 @@ class IPixelController:
         if with_date and self.state.mode is Mode.CLOCK:
             await self._connection.async_send(self._clock_plan())
 
-    async def _async_refresh_woken_clock(self) -> None:
-        """Show the clock again if a command just turned the screen back on.
+    async def _async_refresh_woken_content(self) -> None:
+        """Show the content again if a command just turned the screen back on.
 
-        Brightness and orientation turn the screen on (check V1), showing the
-        clock the panel had: its time, date or options may be stale. Call
-        before recording power, with the lock held.
+        Brightness and orientation turn the screen on (check V1), showing what
+        the panel had: the clock, with a stale time, date or options, or the
+        built-in GIFs instead of an image the panel didn't get on this
+        connection. Call before recording power, with the lock held.
         """
-        if not self.state.power and self.state.mode is Mode.CLOCK:
+        if self.state.power:
+            return
+        if self.state.mode is Mode.CLOCK or (
+            self.state.mode is Mode.IMAGE and not self._image_on_panel
+        ):
             await self._async_show_content()
 
     @callback
@@ -408,6 +575,26 @@ class IPixelController:
                     await self._async_sync_time(with_date=with_date)
         except HomeAssistantError as err:
             _LOGGER.warning("Syncing the time of %s failed: %s", self.address, err)
+
+    @callback
+    def _async_hass_started(self, _hass: HomeAssistant) -> None:
+        """Show the image a restore left for later, now that HA has started."""
+        self._hass_started = True
+        if self.connected and self.image_shown and not self._image_on_panel:
+            self.entry.async_create_background_task(
+                self.hass,
+                self._async_show_late_image(),
+                f"{DOMAIN} show image {self.address}",
+            )
+
+    async def _async_show_late_image(self) -> None:
+        """Show the image, unless it was sent or replaced meanwhile."""
+        try:
+            async with self._async_operation(connect=False) as connected:
+                if connected and self.image_shown and not self._image_on_panel:
+                    await self._async_show_content()
+        except HomeAssistantError as err:
+            _LOGGER.warning("Showing the image on %s failed: %s", self.address, err)
 
     @callback
     def _async_reconnect_soon(self) -> None:
@@ -487,6 +674,7 @@ class IPixelController:
         self.last_connected = dt_util.utcnow()
         self.last_error = None
         self._needs_restore = True
+        self._image_sent = None
         if self._lost:
             self._lost = False
             _LOGGER.info("Reconnected to %s", self.address)
@@ -517,13 +705,32 @@ class IPixelController:
         """Return the data for the Store, read when it's written."""
         return self.state.as_dict()
 
-    def _error(self, key: str, **placeholders: str) -> HomeAssistantError:
-        """Return a translated error about this display."""
-        return HomeAssistantError(
+    def _error(
+        self, key: str, *, validation: bool = False, **placeholders: str
+    ) -> HomeAssistantError:
+        """Return a translated error about this display.
+
+        With validation, the action was used wrongly: a ServiceValidationError.
+        """
+        error = ServiceValidationError if validation else HomeAssistantError
+        return error(
             translation_domain=DOMAIN,
             translation_key=key,
             translation_placeholders={"name": self.entry.title, **placeholders},
         )
+
+    @contextmanager
+    def _buffering(self) -> Iterator[None]:
+        """Mark an image transfer in progress, telling the entities."""
+        self._transfers += 1
+        if self._transfers == 1:
+            self._async_notify()
+        try:
+            yield
+        finally:
+            self._transfers -= 1
+            if not self._transfers:
+                self._async_notify()
 
     @callback
     def _async_notify(self) -> None:

@@ -14,7 +14,7 @@ from homeassistant.const import (
     EntityCategory,
 )
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers import device_registry as dr, entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
@@ -28,6 +28,8 @@ POWER = "switch.kitchen_pixel_power"
 BRIGHTNESS = "number.kitchen_pixel_brightness"
 ORIENTATION = "select.kitchen_pixel_orientation"
 MODE = "select.kitchen_pixel_mode"
+IMAGE_PLAYER = "media_player.kitchen_pixel_image_player"
+IMAGE_FIT = "select.kitchen_pixel_image_fit"
 CLOCK_STYLE = "select.kitchen_pixel_clock_style"
 CLOCK_24H = "switch.kitchen_pixel_clock_24_hour_format"
 CLOCK_SHOW_DATE = "switch.kitchen_pixel_clock_show_date"
@@ -62,6 +64,8 @@ async def test_entities_are_prefixed_with_the_display_name(
         POWER: (f"{ADDRESS}_power", None),
         BRIGHTNESS: (f"{ADDRESS}_brightness", None),
         MODE: (f"{ADDRESS}_mode", None),
+        IMAGE_PLAYER: (f"{ADDRESS}_image_player", None),
+        IMAGE_FIT: (f"{ADDRESS}_image_fit", EntityCategory.CONFIG),
         CLOCK_STYLE: (f"{ADDRESS}_clock_style", EntityCategory.CONFIG),
         CLOCK_24H: (f"{ADDRESS}_clock_24h", EntityCategory.CONFIG),
         CLOCK_SHOW_DATE: (f"{ADDRESS}_clock_show_date", EntityCategory.CONFIG),
@@ -133,8 +137,10 @@ async def test_two_displays(
             ("binary_sensor", "connected"),
             ("button", "disconnect"),
             ("button", "sync_time"),
+            ("media_player", "image_player"),
             ("number", "brightness"),
             ("select", "clock_style"),
+            ("select", "image_fit"),
             ("select", "mode"),
             ("select", "orientation"),
             ("sensor", "height"),
@@ -222,7 +228,7 @@ async def test_mode(
     await setup_entry(hass, mock_config_entry)
     state = hass.states.get(MODE)
     assert state.state == STATE_UNKNOWN
-    assert state.attributes["options"] == ["clock"]
+    assert state.attributes["options"] == ["clock", "image"]
     assert state.attributes["friendly_name"] == f"{NAME} Mode"
     mock_panel.writes.clear()
 
@@ -235,6 +241,49 @@ async def test_mode(
 
     assert hass.states.get(MODE).state == "clock"
     assert mock_panel.commands == ["clock 1 24h date", "set_time"]
+
+
+async def test_mode_image_without_an_image(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Image needs an image played first: the error says so (F7.2)."""
+    await setup_entry(hass, mock_config_entry)
+
+    with pytest.raises(ServiceValidationError) as err:
+        await call(
+            hass,
+            "select",
+            SERVICE_SELECT_OPTION,
+            **{ATTR_ENTITY_ID: MODE, ATTR_OPTION: "image"},
+        )
+
+    assert str(err.value) == (
+        f"{NAME} has no image to show yet. Play one with the image player first"
+    )
+    assert hass.states.get(MODE).state == STATE_UNKNOWN
+
+
+async def test_image_fit(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Image fit is a setting: Fill by default, or Fit."""
+    await setup_entry(hass, mock_config_entry)
+    state = hass.states.get(IMAGE_FIT)
+    assert state.state == "fill"
+    assert state.attributes["options"] == ["fill", "fit"]
+    assert state.attributes["friendly_name"] == f"{NAME} Image fit"
+    mock_panel.writes.clear()
+
+    await call(
+        hass,
+        "select",
+        SERVICE_SELECT_OPTION,
+        **{ATTR_ENTITY_ID: IMAGE_FIT, ATTR_OPTION: "fit"},
+    )
+
+    assert hass.states.get(IMAGE_FIT).state == "fit"
+    # No image shown: nothing to send again
+    assert mock_panel.writes == []
 
 
 async def test_clock_options(
@@ -346,10 +395,11 @@ async def test_controls_need_the_panel(
 
     await setup_entry(hass, mock_config_entry)
 
-    for entity_id in (POWER, BRIGHTNESS, MODE):
+    for entity_id in (POWER, BRIGHTNESS, MODE, IMAGE_PLAYER):
         assert hass.states.get(entity_id).state == STATE_UNAVAILABLE
     for entity_id in (
         CLOCK_STYLE,
+        IMAGE_FIT,
         CLOCK_24H,
         CLOCK_SHOW_DATE,
         SYNC_TIME,

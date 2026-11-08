@@ -11,12 +11,12 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .controller import IPixelConfigEntry, IPixelController
 from .entity import IPixelEntity
-from .state import DisplayState, Mode
+from .state import DisplayState, ImageFit, Mode
 
 PARALLEL_UPDATES = 0
 
-# What the panel can be asked to show. Images arrive with the image player.
-MODE_OPTIONS = [Mode.CLOCK.value]
+# What the panel can be asked to show
+MODE_OPTIONS = [Mode.CLOCK.value, Mode.IMAGE.value]
 
 # The clock styles, values 1 to 8, named after their time screen on a 32×32
 # panel; the date screen is the same for all (check V5). Other models may draw
@@ -59,8 +59,12 @@ SELECTS = (
         options=MODE_OPTIONS,
         # Unknown until HA shows something (F7.4)
         current_fn=lambda state: state.mode and state.mode.value,
-        # The clock is the only option for now
-        select_fn=lambda controller, _option: controller.async_show_clock(),
+        # Image shows the last image again, or fails if there's none (F7.2)
+        select_fn=lambda controller, option: (
+            controller.async_show_image()
+            if option == Mode.IMAGE
+            else controller.async_show_clock()
+        ),
     ),
     IPixelSelectEntityDescription(
         key="clock_style",
@@ -70,6 +74,17 @@ SELECTS = (
         current_fn=lambda state: CLOCK_STYLES[state.clock.style],
         select_fn=lambda controller, option: controller.async_set_clock(
             style=CLOCK_STYLE_VALUES[option]
+        ),
+    ),
+    IPixelSelectEntityDescription(
+        key="image_fit",
+        translation_key="image_fit",
+        entity_category=EntityCategory.CONFIG,
+        options=[fit.value for fit in ImageFit],
+        current_fn=lambda state: state.image_fit.value,
+        # Sent again only while the image is shown (D10)
+        select_fn=lambda controller, option: controller.async_set_image_fit(
+            ImageFit(option)
         ),
     ),
     IPixelSelectEntityDescription(

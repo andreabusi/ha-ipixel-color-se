@@ -8,9 +8,11 @@ from homeassistant.components.bluetooth import (
     async_address_reachability_diagnostics,
     async_last_service_info,
 )
+from homeassistant.components.diagnostics import REDACTED
 from homeassistant.core import HomeAssistant
 
 from .controller import IPixelConfigEntry
+from .image_source import redact_url
 
 
 async def async_get_config_entry_diagnostics(
@@ -21,15 +23,20 @@ async def async_get_config_entry_diagnostics(
     address = controller.address
     # connectable=False also returns advertisements heard by passive scanners
     service_info = async_last_service_info(hass, address, connectable=False)
+    state = controller.state.as_dict()
+    if image := state["image"]:
+        # The query string of a URL may hold a token
+        image["media_id"] = redact_url(image["media_id"], REDACTED)
     return {
         "entry": {"title": entry.title, "data": dict(entry.data)},
-        "state": controller.state.as_dict(),
+        "state": state,
         "connection": {
             "connected": controller.connected,
             "reachable": controller.reachable,
             "last_connected": _isoformat(controller.last_connected),
             "last_disconnected": _isoformat(controller.last_disconnected),
             "last_error": controller.last_error,
+            "buffering": controller.buffering,
         },
         "bluetooth": {
             "last_advertisement": service_info

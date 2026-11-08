@@ -19,6 +19,7 @@ from .common import ADDRESS, INFO_FRAME, FakePanel, ack
 
 BRIGHTNESS = bytes.fromhex("05 00 04 80 46")
 POWER_ON = bytes.fromhex("05 00 07 01 01")
+SET_TIME = bytes.fromhex("08 00 01 80 13 11 02 00")
 
 
 def plan(*windows: bytes, **kwargs: object) -> SendPlan:
@@ -124,13 +125,16 @@ async def test_windows_are_written_in_chunks(
     connection: IPixelConnection, mock_panel: FakePanel
 ) -> None:
     """Each window goes out in chunk_size writes, then waits for its ACK."""
-    window = bytes(range(256)) * 2 + bytes(88)  # 600 bytes
-    mock_panel.responder = lambda data: [] if len(data) == 244 else [ack(window)]
+    # 600 bytes, starting with their length
+    window = (
+        (600).to_bytes(2, "little") + b"\x03\x00" + bytes(range(256)) * 2 + bytes(84)
+    )
+    mock_panel.responder = lambda data: [ack(data)]
 
     await connection.async_send(plan(window, window))
 
-    assert [len(data) for data in mock_panel.writes] == [244, 244, 112] * 2
-    assert b"".join(mock_panel.writes[:3]) == window
+    assert [len(data) for data in mock_panel.chunks] == [244, 244, 112] * 2
+    assert mock_panel.writes == [window, window]
 
 
 async def test_final_ack(connection: IPixelConnection, mock_panel: FakePanel) -> None:
@@ -143,15 +147,49 @@ async def test_final_ack(connection: IPixelConnection, mock_panel: FakePanel) ->
     assert len(mock_panel.writes) == 2
 
 
+async def test_final_ack_after_the_last_window(
+    connection: IPixelConnection, mock_panel: FakePanel
+) -> None:
+    """The end-of-transfer ACK may follow the last window's own ACK."""
+    loop = asyncio.get_running_loop()
+
+    def late_end(data: bytes) -> list[bytes]:
+        loop.call_later(0.01, mock_panel.client.notify, ack(data, 3))
+        return [ack(data, 1)]
+
+    mock_panel.responder = late_end
+
+    await connection.async_send(plan(POWER_ON, final_ack=True))
+
+    assert len(mock_panel.writes) == 1
+
+
+async def test_ack_of_another_command_is_ignored(
+    connection: IPixelConnection,
+    mock_panel: FakePanel,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only an ACK that echoes the command's bytes 2 and 3 counts (check V9).
+
+    A late ACK of another command can't let the next window go too early.
+    """
+    monkeypatch.setattr(connection_module, "ACK_TIMEOUT", 0.05)
+    mock_panel.responder = lambda _data: [ack(POWER_ON)]
+
+    with pytest.raises(IPixelCommandError, match="didn't acknowledge"):
+        await connection.async_send(plan(BRIGHTNESS))
+
+    mock_panel.responder = lambda data: [ack(POWER_ON), ack(data)]
+    await connection.async_send(plan(BRIGHTNESS))
+
+
 async def test_request_returns_the_response(
     connection: IPixelConnection, mock_panel: FakePanel
 ) -> None:
     """A request skips ACKs and returns the first other frame."""
     mock_panel.responder = lambda data: [ack(data), INFO_FRAME]
     request = SendPlan(
-        name="info",
-        windows=(Window(data=b"\x08\x00\x01\x80", ack=False),),
-        response=True,
+        name="info", windows=(Window(data=SET_TIME, ack=False),), response=True
     )
 
     assert await connection.async_request(request) == INFO_FRAME
