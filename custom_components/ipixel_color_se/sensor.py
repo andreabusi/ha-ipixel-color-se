@@ -3,8 +3,13 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from homeassistant.components.sensor import SensorEntity, SensorEntityDescription
-from homeassistant.const import EntityCategory
+from homeassistant.components.sensor import (
+    SensorDeviceClass,
+    SensorEntity,
+    SensorEntityDescription,
+    SensorStateClass,
+)
+from homeassistant.const import SIGNAL_STRENGTH_DECIBELS_MILLIWATT, EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
@@ -36,6 +41,18 @@ SENSORS = (
         native_unit_of_measurement="px",
         entity_category=EntityCategory.DIAGNOSTIC,
         value_fn=lambda controller: controller.panel.height,
+    ),
+    # Updated only while the panel advertises, which it doesn't while
+    # connected (check V4): connected, it keeps the last known value
+    IPixelSensorEntityDescription(
+        key="signal_strength",
+        translation_key="signal_strength",
+        device_class=SensorDeviceClass.SIGNAL_STRENGTH,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=SIGNAL_STRENGTH_DECIBELS_MILLIWATT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        entity_registry_enabled_default=False,
+        value_fn=lambda controller: controller.rssi,
     ),
 )
 

@@ -28,6 +28,7 @@ from custom_components.ipixel_color_se import connection as connection_module
 from custom_components.ipixel_color_se.const import DOMAIN
 from custom_components.ipixel_color_se.controller import (
     RECONNECT_COOLDOWN,
+    RSSI_WRITE_INTERVAL,
     IPixelController,
 )
 from custom_components.ipixel_color_se.state import (
@@ -39,6 +40,8 @@ from custom_components.ipixel_color_se.state import (
 )
 
 from .common import (
+    ADAPTER,
+    RSSI,
     FakePanel,
     ack,
     describe,
@@ -1420,3 +1423,135 @@ async def test_media_source_image_survives_a_restart(
         "title": "cat.gif",
     }
     assert mock_panel.commands == ["set_time", "orientation 0", "gif"]
+
+
+async def disconnected_controller(
+    hass: HomeAssistant, entry: MockConfigEntry
+) -> IPixelController:
+    """Set up a display and free the panel, which then advertises (check V4)."""
+    await setup_entry(hass, entry)
+    controller: IPixelController = entry.runtime_data
+    await controller.async_disconnect()
+    await hass.async_block_till_done(wait_background_tasks=True)
+    return controller
+
+
+async def test_signal_strength_starts_from_the_bluetooth_history(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """The panel goes silent once connected: HA's history gives the value."""
+    await setup_entry(hass, mock_config_entry)
+
+    assert mock_config_entry.runtime_data.rssi == RSSI
+
+
+async def test_signal_strength_unknown_without_a_history(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Nothing is known about a panel HA's Bluetooth never heard."""
+    mock_panel.present = False
+
+    await setup_entry(hass, mock_config_entry)
+
+    assert mock_config_entry.runtime_data.rssi is None
+
+
+async def test_signal_strength_writes_are_limited(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """One write per interval, however much the RSSI swings (plan §4.2)."""
+    controller = await disconnected_controller(hass, mock_config_entry)
+    writes: list[int | None] = []
+    controller.async_add_listener(lambda: writes.append(controller.rssi))
+
+    # The first advertisement after a while is written at once
+    mock_panel.advertise(rssi=-72)
+    assert writes == [-72]
+
+    writes.clear()
+    for rssi in (-67, -72, -60, -73):
+        mock_panel.advertise(rssi=rssi)
+    assert writes == []
+    assert controller.rssi == -72
+
+    # The strongest value of the interval, not the latest
+    freezer.tick(RSSI_WRITE_INTERVAL + 1)
+    mock_panel.advertise(rssi=-74)
+    assert writes == [-60]
+
+    # The next interval starts over
+    writes.clear()
+    freezer.tick(RSSI_WRITE_INTERVAL + 1)
+    mock_panel.advertise(rssi=-74)
+    assert writes == [-74]
+
+    # An unchanged value isn't written again
+    writes.clear()
+    freezer.tick(RSSI_WRITE_INTERVAL + 1)
+    mock_panel.advertise(rssi=-74)
+    assert writes == []
+
+
+async def test_signal_strength_uses_the_strongest_scanner(
+    hass: HomeAssistant,
+    freezer: FrozenDateTimeFactory,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Each scanner reports its own RSSI: the strongest one counts."""
+    controller = await disconnected_controller(hass, mock_config_entry)
+    mock_panel.advertise(rssi=-80, source="adapter")
+
+    mock_panel.advertise(rssi=-60, source="proxy")
+    mock_panel.advertise(rssi=-80, source="adapter")
+    freezer.tick(RSSI_WRITE_INTERVAL + 1)
+    mock_panel.advertise(rssi=-80, source="adapter")
+    assert controller.rssi == -60
+
+    # The proxy went away: the adapter is all that's left
+    freezer.tick(RSSI_WRITE_INTERVAL + 1)
+    mock_panel.advertise(rssi=-80, source="adapter")
+    assert controller.rssi == -80
+
+
+async def test_signal_strength_ignores_scanners_that_cant_connect(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """A passive scanner isn't a path HA could connect through."""
+    controller = await disconnected_controller(hass, mock_config_entry)
+
+    mock_panel.advertise(rssi=-40, connectable=False)
+
+    assert controller.rssi == RSSI
+
+
+async def test_signal_strength_keeps_its_value_while_connected(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """The panel is silent while connected (check V4): the last value stays."""
+    controller = await disconnected_controller(hass, mock_config_entry)
+    mock_panel.advertise(rssi=-70)
+
+    await controller.async_set_auto_reconnect(True)
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert controller.connected
+    assert controller.rssi == -70
+
+
+async def test_adapter_is_kept_after_disconnecting(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Diagnostics can tell which path a dropped connection used."""
+    await setup_entry(hass, mock_config_entry)
+    controller: IPixelController = mock_config_entry.runtime_data
+    assert controller.adapter == ADAPTER
+
+    mock_panel.lose_power()
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert not controller.connected
+    assert controller.adapter == ADAPTER

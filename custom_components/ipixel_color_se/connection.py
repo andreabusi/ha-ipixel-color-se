@@ -77,6 +77,18 @@ class IPixelConnection:
         """Return whether the connection is up."""
         return self._client is not None and self._client.is_connected
 
+    @property
+    def adapter(self) -> str | None:
+        """Return the name of the adapter or proxy of this connection, if known.
+
+        The panel is silent while connected (check V4), so the last
+        advertisement can't tell, and HA picks the path itself, among all the
+        scanners that hear the panel. It has no public way to ask which one
+        it chose: this reads its client wrapper, and a test catches a change.
+        """
+        scanner = getattr(self._client, "_connected_scanner", None)
+        return None if scanner is None else scanner.name
+
     async def async_connect(self) -> None:
         """Connect, unless already connected.
 

@@ -1,5 +1,8 @@
 """Tests for the entities and the device of a display."""
 
+import json
+from pathlib import Path
+
 from homeassistant.components.button import SERVICE_PRESS
 from homeassistant.components.number import ATTR_VALUE, SERVICE_SET_VALUE
 from homeassistant.components.select import ATTR_OPTION, SERVICE_SELECT_OPTION
@@ -38,6 +41,7 @@ AUTO_RECONNECT = "switch.kitchen_pixel_auto_reconnect"
 DISCONNECT = "button.kitchen_pixel_disconnect"
 CONNECTED = "binary_sensor.kitchen_pixel_connected"
 WIDTH = "sensor.kitchen_pixel_width"
+SIGNAL_STRENGTH = "sensor.kitchen_pixel_signal_strength"
 
 
 async def call(hass: HomeAssistant, domain: str, service: str, **data: object) -> None:
@@ -79,6 +83,7 @@ async def test_entities_are_prefixed_with_the_display_name(
             f"{ADDRESS}_height",
             EntityCategory.DIAGNOSTIC,
         ),
+        SIGNAL_STRENGTH: (f"{ADDRESS}_signal_strength", EntityCategory.DIAGNOSTIC),
     }
     width = hass.states.get("sensor.kitchen_pixel_width")
     assert width.state == "32"
@@ -144,6 +149,7 @@ async def test_two_displays(
             ("select", "mode"),
             ("select", "orientation"),
             ("sensor", "height"),
+            ("sensor", "signal_strength"),
             ("sensor", "width"),
             ("switch", "auto_reconnect"),
             ("switch", "clock_24_hour_format"),
@@ -410,3 +416,60 @@ async def test_controls_need_the_panel(
         WIDTH,
     ):
         assert hass.states.get(entity_id).state != STATE_UNAVAILABLE
+
+
+async def test_signal_strength_is_disabled_by_default(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """It's only useful for checking the range, and rarely changes (check V4)."""
+    await setup_entry(hass, mock_config_entry)
+
+    entry = entity_registry.async_get(SIGNAL_STRENGTH)
+    assert entry is not None
+    assert entry.disabled_by is er.RegistryEntryDisabler.INTEGRATION
+    assert hass.states.get(SIGNAL_STRENGTH) is None
+
+
+async def test_signal_strength_when_enabled(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    entity_registry: er.EntityRegistry,
+) -> None:
+    """Enabled, it reports the RSSI in dBm, also while disconnected."""
+    mock_config_entry.add_to_hass(hass)
+    entity_registry.async_get_or_create(
+        "sensor",
+        DOMAIN,
+        f"{ADDRESS}_signal_strength",
+        config_entry=mock_config_entry,
+        suggested_object_id="kitchen_pixel_signal_strength",
+    )
+    await setup_entry(hass, mock_config_entry)
+
+    state = hass.states.get(SIGNAL_STRENGTH)
+    assert state.state == "-62"
+    assert state.attributes["unit_of_measurement"] == "dBm"
+    assert state.attributes["device_class"] == "signal_strength"
+    assert state.attributes["state_class"] == "measurement"
+
+    await call(hass, "button", SERVICE_PRESS, entity_id=DISCONNECT)
+    mock_panel.advertise(rssi=-75)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(SIGNAL_STRENGTH)
+    assert state.state == "-75"
+
+
+def test_every_entity_has_an_icon() -> None:
+    """icons.json covers every entity that has a name."""
+    component = Path(__file__).parent.parent / "custom_components" / DOMAIN
+    names = json.loads((component / "translations/en.json").read_text())["entity"]
+    icons = json.loads((component / "icons.json").read_text())["entity"]
+
+    assert {platform: sorted(entities) for platform, entities in icons.items()} == {
+        platform: sorted(entities) for platform, entities in names.items()
+    }

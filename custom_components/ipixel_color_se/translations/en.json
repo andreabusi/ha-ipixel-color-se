@@ -115,6 +115,9 @@
       },
       "height": {
         "name": "Height"
+      },
+      "signal_strength": {
+        "name": "Signal strength"
       }
     },
     "switch": {

@@ -60,6 +60,7 @@ def mock_panel() -> Generator[FakePanel]:
             panel.register_advertisement_callback,
         ),
         patch(f"{PACKAGE}.controller.async_track_unavailable", panel.track_unavailable),
+        patch(f"{PACKAGE}.controller.async_last_service_info", panel.last_service_info),
         patch(
             f"{PACKAGE}.config_flow.async_discovered_service_info",
             lambda *_args, **_kwargs: [service_info()] if panel.present else [],

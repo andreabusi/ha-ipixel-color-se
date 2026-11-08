@@ -1,5 +1,13 @@
 {
   "entity": {
+    "binary_sensor": {
+      "connected": {
+        "default": "mdi:bluetooth-off",
+        "state": {
+          "on": "mdi:bluetooth-connect"
+        }
+      }
+    },
     "button": {
       "sync_time": {
         "default": "mdi:clock-check-outline"
@@ -45,6 +53,9 @@
       },
       "height": {
         "default": "mdi:arrow-expand-vertical"
+      },
+      "signal_strength": {
+        "default": "mdi:signal"
       }
     },
     "switch": {
@@ -64,9 +75,9 @@
         }
       },
       "auto_reconnect": {
-        "default": "mdi:bluetooth-connect",
+        "default": "mdi:autorenew",
         "state": {
-          "off": "mdi:bluetooth"
+          "off": "mdi:autorenew-off"
         }
       }
     }

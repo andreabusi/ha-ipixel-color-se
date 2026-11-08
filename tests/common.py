@@ -3,6 +3,7 @@
 from collections.abc import Callable, Sequence
 from io import BytesIO
 import random
+from types import SimpleNamespace
 
 from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
@@ -19,6 +20,9 @@ from custom_components.ipixel_color_se.const import (
 ADDRESS = "AA:BB:CC:DD:EE:FF"
 BLE_NAME = "LED_BLE_CCDDEEFF"
 NAME = "Kitchen Pixel"
+RSSI = -62
+SOURCE = "00:00:00:00:00:01"
+ADAPTER = f"hci0 ({SOURCE})"
 
 # The real reply of a 32×32 panel to set_time (check V9)
 INFO_FRAME = bytes.fromhex("0c 00 01 80 81 11 02 00 00 01 00 01")
@@ -107,6 +111,7 @@ class FakeBleakClient:
         self.is_connected = True
         self.closed = False
         self.notifying = False
+        self._connected_scanner = SimpleNamespace(name=ADAPTER)
         self._disconnected_callback = disconnected_callback
         self._notify: Callable[[object, bytearray], None] | None = None
 
@@ -247,13 +252,19 @@ class FakePanel:
         self.screen_on = True
         return 3
 
-    def advertise(self, *, connectable: bool = True) -> None:
+    def advertise(
+        self,
+        *,
+        connectable: bool = True,
+        rssi: int = RSSI,
+        source: str = SOURCE,
+    ) -> None:
         """Advertise, as the panel does while powered and not connected (check V4).
 
         Like HA's Bluetooth manager, call the callbacks before recording the
         advertisement: until then the panel can't be looked up.
         """
-        info = service_info(connectable=connectable)
+        info = service_info(connectable=connectable, rssi=rssi, source=source)
         for callback in list(self.advertisement_callbacks):
             callback(info)
         if connectable:
@@ -279,6 +290,12 @@ class FakePanel:
         self.powered = True
         self.screen_on = True
         self.advertise()
+
+    def last_service_info(
+        self, *_args: object, **_kwargs: object
+    ) -> BluetoothServiceInfoBleak | None:
+        """Stand in for bluetooth.async_last_service_info."""
+        return service_info() if self.present else None
 
     def register_advertisement_callback(
         self,
@@ -341,16 +358,18 @@ def service_info(
     service_uuids: list[str] | None = None,
     *,
     connectable: bool = True,
+    rssi: int = RSSI,
+    source: str = SOURCE,
 ) -> BluetoothServiceInfoBleak:
     """Return an advertisement like the panel's."""
     return BluetoothServiceInfoBleak(
         name=name,
         address=address,
-        rssi=-62,
+        rssi=rssi,
         manufacturer_data={21076: bytes.fromhex("00 72 00 07 02 00 81")},
         service_data={},
         service_uuids=service_uuids or [],
-        source="00:00:00:00:00:01",
+        source=source,
         device=BLEDevice(address, name, {}),
         advertisement=None,
         connectable=connectable,

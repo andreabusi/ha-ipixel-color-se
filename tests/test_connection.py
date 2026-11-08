@@ -3,7 +3,9 @@
 import asyncio
 from unittest.mock import Mock
 
+from bleak.backends.device import BLEDevice
 from bleak.exc import BleakError
+from habluetooth.wrappers import HaBleakClientWrapper
 from homeassistant.core import HomeAssistant
 import pytest
 
@@ -270,3 +272,10 @@ async def test_disconnect(
 
     await connection.async_disconnect()
     callbacks.disconnected.assert_called_once_with(True)
+
+
+async def test_ha_client_wrapper_still_tracks_the_scanner(hass: HomeAssistant) -> None:
+    """IPixelConnection.adapter reads this private attribute of HA's wrapper."""
+    client = HaBleakClientWrapper(BLEDevice("AA:BB:CC:DD:EE:FF", "panel", {}))
+
+    assert client._connected_scanner is None

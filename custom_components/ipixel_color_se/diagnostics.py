@@ -33,12 +33,14 @@ async def async_get_config_entry_diagnostics(
         "connection": {
             "connected": controller.connected,
             "reachable": controller.reachable,
+            "adapter": controller.adapter,
             "last_connected": _isoformat(controller.last_connected),
             "last_disconnected": _isoformat(controller.last_disconnected),
             "last_error": controller.last_error,
             "buffering": controller.buffering,
         },
         "bluetooth": {
+            "rssi": controller.rssi,
             "last_advertisement": service_info
             and {
                 "name": service_info.name,

@@ -14,8 +14,10 @@
         'source': '00:00:00:00:00:01',
       }),
       'reachability': 'unknown (never seen by any scanner); 1 scanner(s) registered, 1 scanning, 1 connectable',
+      'rssi': -62,
     }),
     'connection': dict({
+      'adapter': 'hci0 (00:00:00:00:00:01)',
       'buffering': False,
       'connected': True,
       'last_connected': '2026-11-07T18:17:00+00:00',

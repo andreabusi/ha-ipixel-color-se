@@ -13,6 +13,7 @@ from typing import Any
 from homeassistant.components.bluetooth import (
     BluetoothServiceInfoBleak,
     async_address_present,
+    async_last_service_info,
     async_register_advertisement_callback,
     async_track_unavailable,
 )
@@ -40,6 +41,11 @@ SAVE_DELAY = 1.0
 # Seconds to wait after a failed connection attempt before reconnecting by
 # ourselves again (F3.3). A command still connects at once.
 RECONNECT_COOLDOWN = 30.0
+
+# The panel advertises several times a second, and its RSSI swings by 5-6 dBm
+# from one advertisement to the next: write the signal strength this often at
+# most, with the strongest value heard meanwhile (plan §4.2).
+RSSI_WRITE_INTERVAL = 30.0
 
 # When the time is synced on schedule, in HA's time zone (F6.5). Just after
 # midnight the clock also gets the new date (F6.6), although the panel moves
@@ -82,6 +88,14 @@ class IPixelController:
         self.last_connected: datetime | None = None
         self.last_disconnected: datetime | None = None
         self.last_error: str | None = None
+        self.rssi: int | None = None
+        """The last known signal strength, in dBm.
+
+        The panel is silent while connected (check V4), so this is the value
+        from just before the connection, not a live one.
+        """
+        self.adapter: str | None = None
+        """The adapter or proxy of the current or last connection."""
         self._connection = IPixelConnection(
             hass,
             self.address,
@@ -97,6 +111,9 @@ class IPixelController:
         self._lock = asyncio.Lock()
         self._connect_task: asyncio.Task[None] | None = None
         self._retry_after = 0.0
+        # The strongest RSSI since the last write, and when that was
+        self._rssi_peak: int | None = None
+        self._rssi_written = 0.0
         self._needs_restore = False
         self._lost = False
         self._stopped = False
@@ -196,6 +213,13 @@ class IPixelController:
                 **SYNC_AFTER_DST,
             ),
         ]
+        # The panel goes silent once connected (check V4), and the callback
+        # doesn't replay past advertisements: without this the sensor would
+        # stay unknown after every HA restart
+        last = async_last_service_info(self.hass, self.address, connectable=True)
+        if last is not None:
+            self.rssi = last.rssi
+            self._async_notify()
         self._async_set_reachable(
             async_address_present(self.hass, self.address, connectable=True)
         )
@@ -653,8 +677,29 @@ class IPixelController:
         """
         if not service_info.connectable:
             return
+        self._async_record_rssi(service_info)
         self._async_set_reachable(True)
         self._async_reconnect_soon()
+
+    @callback
+    def _async_record_rssi(self, service_info: BluetoothServiceInfoBleak) -> None:
+        """Update the signal strength, at most once per interval (plan §4.2).
+
+        Called once per scanner that hears the panel. The strongest value of
+        the interval counts, whichever scanner heard it: it's the path HA
+        would connect through, and it doesn't jump with every advertisement.
+        """
+        rssi = service_info.rssi
+        if self._rssi_peak is None or rssi > self._rssi_peak:
+            self._rssi_peak = rssi
+        now = monotonic()
+        if now - self._rssi_written < RSSI_WRITE_INTERVAL:
+            return
+        peak, self._rssi_peak = self._rssi_peak, None
+        self._rssi_written = now
+        if peak != self.rssi:
+            self.rssi = peak
+            self._async_notify()
 
     @callback
     def _async_unavailable(self, _service_info: BluetoothServiceInfoBleak) -> None:
@@ -673,6 +718,7 @@ class IPixelController:
         """Record a new connection, which needs a restore."""
         self.last_connected = dt_util.utcnow()
         self.last_error = None
+        self.adapter = self._connection.adapter
         self._needs_restore = True
         self._image_sent = None
         if self._lost:
