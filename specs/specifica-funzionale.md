@@ -348,7 +348,7 @@ Esempio per un display chiamato "Pixel Taverna". Nomi ed entity_id sono quelli a
 | ID | Decisione |
 |---|---|
 | D1 | Nessuna migrazione: installazione pulita (§8) |
-| D1-bis | Dominio `ipixel_color_se`. Pubblicazione su GitHub, HACS da valutare in seguito (T7) |
+| D1-bis | Dominio `ipixel_color_se`. Pubblicazione su GitHub, installazione da HACS come repository custom (T7) |
 | D2 | Due entità separate: `Power` (switch) e `Brightness` (number) (§5.5) |
 | D3 | Con `Auto reconnect` disattivo, un comando riapre la connessione. `Disconnect` chiude la connessione e spegne `Auto reconnect` (§5.3) |
 | D4 | Dopo ogni riconnessione si ripristina lo stato voluto (§5.9) |

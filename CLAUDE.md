@@ -15,7 +15,7 @@ The design documents in `specs/` are written in Italian and are the source of tr
 
 Work one milestone at a time. Start a milestone only when the user asks, and don't implement anything that belongs to a later one. When a decision changes, update the spec or the plan.
 
-**Current state**: M4 (images). `image_source.py` reads URLs, `/local/` files and media sources. The `Image player` handles play_media, Play, Stop and the Media browser. `Mode` has the `clock` and `image` options. `Image fit` (fill, fit) resends a shown image (D10). The image is part of the restore, with the fallback to the clock (F9.4), and waits for HA to start. Before that: M3's clock, its options, `Sync time` and the scheduled syncs; M2's `Power`, `Brightness`, `Orientation`, `Auto reconnect`, `Disconnect`, the Store and the reconnection; and M1's `Connected`, `Width` and `Height`. No `Signal strength`, `brand/`, README or release yet: they arrive in M5. Update this line at the end of each milestone.
+**Current state**: M5 done, so phase 1 is complete: `v0.1.0` is released and the user's HA runs it from HACS. M5 added `Signal strength`, the complete diagnostics, the icons, `brand/`, the README and the HACS validation. Before that: M4's images (`image_source.py`, the `Image player`, `Mode` with `clock` and `image`, `Image fit`, the restore with the fallback to the clock, F9.4); M3's clock, its options, `Sync time` and the scheduled syncs; M2's `Power`, `Brightness`, `Orientation`, `Auto reconnect`, `Disconnect`, the Store and the reconnection; and M1's `Connected`, `Width` and `Height`. Text is phase 2 and isn't started. Update this line at the end of each milestone.
 
 ## Conventions
 
@@ -55,6 +55,9 @@ docker run --rm --platform linux/amd64 -v "$PWD":/github/workspace ghcr.io/home-
 - Ruff excludes `specs/`, because it would reformat the code blocks in the Markdown documents.
 - The hassfest image is amd64 only: on Apple Silicon it runs emulated.
 - CI (`.github/workflows/ci.yml`) runs ruff and pytest, hassfest, and the HACS validation, with no check ignored. The HACS check `brands` looks for `custom_components/ipixel_color_se/brand/icon.png` in the repository tree. HACS also checks the GitHub repository's description and topics.
+- `brand/` holds `icon.png` (256×256) and `icon@2x.png` (512×512). HA serves them at `/api/brands/integration/<domain>/<image>`, and the missing variants (logo, dark) fall back to `icon.png`.
+- The `adapter` in the diagnostics comes from habluetooth's private `_connected_scanner`. `test_ha_client_wrapper_still_tracks_the_scanner` fails if it goes away.
+- Releases: HACS downloads the tag as it is, with no zip asset. Keep `version` in `manifest.json` equal to the tag.
 
 ### Deploying to the user's Home Assistant
 
@@ -70,7 +73,8 @@ scripts/deploy.sh --no-restart
 - You may deploy and restart the container without asking.
 - The script **mirrors** `custom_components/ipixel_color_se/` onto the host: anything there that isn't in the repo (except `__pycache__`) gets deleted. `HA_SSH_HOST` and `HA_CONFIG_DIR` are required; `HA_CONTAINER` defaults to `homeassistant`. Variables set in the environment win over `scripts/deploy.env`.
 - Python changes need a full HA restart: reloading the config entry doesn't re-import modules.
-- **Don't touch the old `ipixel_color` integration** on HA: not its folder, its config entry or its entities. The panel accepts a single connection, so from M1 on the old one must be disabled while the new one connects: ask the user.
+- The user's HA runs the release installed from HACS. `scripts/deploy.sh` overwrites that copy while HACS keeps reporting the version it downloaded: after testing a build this way, download the release again from HACS.
+- Recreating a config entry doesn't reset the registry: when the same `unique_id` comes back, HA restores the entity's old `disabled_by` and the device's id. A sensor enabled by hand stays enabled, so check a default in the tests, not by recreating the entry.
 - Logs: `home-assistant.log` in the config dir (`/config` in the container), or `docker logs <container>`, over SSH.
 - REST API: `http://<ha-host>:8123/api/`, with an admin token kept in a file outside the repository. **Never print it**: send it as `-H "Authorization: Bearer $(tr -d '[:space:]' < "$TOKEN_FILE")"`. Entity states, actions and config flows can all be checked this way (for example `GET /api/config/config_entries/flow_handlers`).
 - The user does the visual checks on the panel and the power cycles.
@@ -174,6 +178,8 @@ The panel accepts a single BLE connection. While HA holds it, the phone app and 
 ### Advertising while connected
 
 Check V4 (2026-11-07): the panel **stops advertising while it's connected**, and starts again, several times a second, as soon as the connection closes. So the RSSI (`Signal strength`) only updates while disconnected, and HA's Bluetooth manager eventually considers a connected panel unavailable: while connected, ignore the reachability computed from advertisements.
+
+The RSSI swings by 5–6 dBm from one advertisement to the next, several times a second. `Signal strength` is written at most once per 30 s, with the strongest value heard in that time (plan §4.2).
 
 ### Reconnection quirks
 
