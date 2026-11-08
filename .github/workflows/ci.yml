@@ -43,6 +43,4 @@ jobs:
       - uses: hacs/action@22.5.0
         with:
           category: integration
-          # The brand icons arrive in milestone M5
-          ignore: brands
           comment: false
