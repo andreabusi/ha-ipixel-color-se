@@ -64,6 +64,15 @@ rsync_opts=(-rlt --delete --itemize-changes
   --exclude '__pycache__/' --exclude '.DS_Store')
 $dry_run && rsync_opts+=(--dry-run)
 
+if ! $dry_run; then
+  # HACS installs the integration from inside the container, as root: give
+  # its files to the SSH user, or rsync can't replace them. HACS, as root,
+  # can still replace them later.
+  owner="$(ssh "$HA_SSH_HOST" 'echo "$(id -u):$(id -g)"')"
+  ssh "$HA_SSH_HOST" docker exec "$HA_CONTAINER" \
+    chown -R "$owner" "/config/custom_components/$domain"
+fi
+
 echo "→ Syncing to $HA_SSH_HOST:$dest$($dry_run && echo ' (dry run)')"
 rsync "${rsync_opts[@]}" "$src" "$HA_SSH_HOST:$dest"
 
