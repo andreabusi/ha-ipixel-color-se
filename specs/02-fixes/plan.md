@@ -18,7 +18,7 @@ This unit fixes and completes what 01-base built, with the candidates C1–C8 fo
 - **A failed restore is retried after 15 s (C4)**, instead of waiting for the next command.
 - **Panel identity (C5–C7):** the firmware version, read with a command the panel answers, goes in the device page and the diagnostics. The product id comes from the advertisement, and the password flag from the info frame.
 - **Discovery by manufacturer data (C8)**, besides the name.
-- **Write size (C3):** measured first. It changes only if larger writes are clearly faster and reliable on both paths, the USB adapter and the ESPHome proxy.
+- **Write size (C3):** measured first. It changes only if larger writes are clearly faster and reliable on both paths, the USB adapter and the ESPHome proxy. Only the USB adapter was measured, so it stays as it is (D18).
 - **Three milestones**, M6–M8, and six panel checks, V13–V18.
 
 ---
@@ -31,7 +31,7 @@ This unit fixes and completes what 01-base built, with the candidates C1–C8 fo
 | Image transfers through a slow path fail less often with "didn't acknowledge" | F8.8 |
 | After a failed restore, the panel is put right within about 15 s, even if no command follows | F9 |
 | The device page shows the panel's firmware version and its product id (for example `000702`) | F2.6 |
-| The diagnostics add the firmware versions, the advertised identity, the password flag and the size of the writes | F10.4 |
+| The diagnostics add the firmware versions, the advertised identity and the password flag | F10.4 |
 | A password-locked panel logs a warning that explains why it ignores commands | T2 |
 | A panel with the vendor's manufacturer data is discovered even if its name doesn't start with `LED_BLE_` | F1.1 |
 
@@ -81,6 +81,8 @@ The log of the maintainer's HA, from 2026-11-08, while the panel was reached thr
 - Through the USB adapter with a probe script, through the proxy with a temporary build that changes the chunk size, as V6 was done.
 
 **Change**, only if one size is clearly faster on both paths and every transfer still succeeds: `IPixelConnection` derives the chunk size from what the connection allows, capped at the measured size. In any case the allowed size goes in the diagnostics (`connection.write_size`). If nothing changes, the numbers are recorded in the outcomes, and that closes C3.
+
+**Outcome**: through the USB adapter, 509-byte writes made a 58 KB GIF take 20.0 s instead of 23.5–24.9 s, and every transfer succeeded (V18). The proxy wasn't measured, because it proved unstable (D18), so the condition can't be met: the writes stay at 244 bytes, and C3 is closed. `connection.write_size` isn't added either (D19): on BlueZ, bleak reports 23 and 20 bytes, which aren't the real limit.
 
 ### 3.4 Retrying a failed restore (C4)
 
@@ -141,7 +143,7 @@ The snapshot is regenerated, and the diff reviewed.
 
 ## 4. Panel checks
 
-The questions are in [panel-checks.md](../panel-checks.md), as V13–V18. One probe session through the USB adapter, at the start of M6, covers V13, V14, V15 and the adapter part of V17 and V18, so the integration is disconnected only once. V16 comes from HA's Bluetooth diagnostics. The proxy parts of V17 and V18 go through the integration, with M6's timings and a temporary build in M8.
+The questions are in [panel-checks.md](../panel-checks.md), as V13–V18. One probe session through the USB adapter, at the start of M6, covers V13, V14, V15 and the adapter part of V17 and V18, so the integration is disconnected only once. V16 comes from HA's Bluetooth diagnostics. The proxy parts of V17 and V18 go through the integration, with M6's timings and a temporary build in M8. The proxy parts of V16 and V18 weren't run (D18).
 
 | Check | Question, in short | Needed by |
 |---|---|---|
@@ -158,9 +160,9 @@ The questions are in [panel-checks.md](../panel-checks.md), as V13–V18. One pr
 
 | File | What changes |
 |---|---|
-| `tests/common.py` | `FakePanel` answers the firmware read with a `firmware_frame`, can reject given commands with status `0`, has an info frame with the password flag, and its client reports a write size |
+| `tests/common.py` | `FakePanel` answers the firmware read with a `firmware_frame`, can reject given commands with status `0`, and has an info frame with the password flag |
 | `test_protocol.py` | Status names. Firmware request bytes and parsing. Advertisement decoding: the B.K. Light example, a pid from 100 up, no product id, another company, a short payload. The password flag, with a short frame too. `ack_timeout` of the image plan. |
-| `test_connection.py` | Status `0` fails at once, for a command, a window and the final ACK. The retry of a rejected transfer, if adopted. The per-plan timeout. The write size, and the chunks derived from it if C3 changes them. |
+| `test_connection.py` | Status `0` fails at once, for a command, a window and the final ACK. The retry of a rejected transfer, if adopted. The per-plan timeout. |
 | `test_controller.py` | Retry after 15 s of a failed restore: success, second failure, cancelled by a disconnection, skipped when a command restored the panel first. Retry of the late image. Firmware read after the restore, its failure ignored and not repeated. `sw_version` and `model_id` in the device registry. `product_id` written to `entry.data` once, and again only on a change. The password warning, once per connection. |
 | `test_config_flow.py` | A discovery by manufacturer data with another name. The manual list includes it. |
 | `test_diagnostics.py` | The new fields, in the snapshot |
@@ -223,12 +225,14 @@ The outcomes of the panel checks are in [panel-checks.md](../panel-checks.md).
 
 ## 10. Decisions
 
-Taken on 2026-11-15, when the plan was approved.
+D15–D17 were taken on 2026-11-15, when the plan was approved, and D18–D19 the same day, at the start of M8.
 
 | ID | Decision |
 |---|---|
 | D15 | The release is `v0.2.0`: it adds visible behavior and breaks nothing (§8) |
 | D16 | A password-locked panel gets a warning and the flag in the diagnostics, and commands don't fail because of it (§3.7) |
 | D17 | The `fa01` matcher stays, next to the name matcher and the new manufacturer data matcher (§3.8) |
+| D18 | The proxy parts of V16 and V18 aren't run: the ESPHome proxy proved unstable, and went offline again during M7. So the writes stay at 244 bytes, and C3 is closed with the USB adapter's numbers (§3.3). The proxy is still supported: M6 sent 58 KB GIFs through it. |
+| D19 | The diagnostics don't get `connection.write_size`: with no size derived from the connection, it would only show bleak's values, which are wrong on BlueZ (§3.3, V18) |
 
 Out of scope: C9 and all of text (a later unit), N1–N18 of the comparison, unlocking a panel (N14), a brand table (N17).

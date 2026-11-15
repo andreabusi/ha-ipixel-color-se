@@ -143,7 +143,7 @@ The sections of V1–V12 cite the 01-base documents as "spec §n" and "plan §n"
 - **Why**: C6 and C8 (02-fixes plan §3.6, §3.8).
 - **Outcome**, through the USB adapter (2026-11-15): the manufacturer data of company 21076 is `00 72 00 07 02 00 81`, the layout the comparison describes: cid `0007`, pid `02`, so product id `000702`, and type `0x81`. Byte 5 is `00`. The panel advertises no service UUID.
   - No Disconnect was needed. HA's Bluetooth keeps the last advertisement from before the connection, while the panel is connected and silent (check V4), so the integration reads the product id from it at startup too.
-- **Outcome through the ESPHome proxy**: not run yet. The proxy was offline.
+- **Outcome through the ESPHome proxy**: not run (02-fixes D18). The proxy proved unstable, and it was offline.
 
 ### V17: ACK timings of a transfer
 
@@ -162,4 +162,4 @@ The sections of V1–V12 cite the 01-base documents as "spec §n" and "plan §n"
 - **Outcome**, through the USB adapter (2026-11-15):
   - bleak reports `mtu_size` 23 and a `max_write_without_response_size` of 20 for the write characteristic, so on BlueZ neither gives the real limit.
   - Writes of 509 bytes, with response, work anyway. The 58 KB GIF took 20.0 s, against 23.5 and 24.9 s with 244-byte writes, and a 12 KB window took 4.1–4.6 s instead of 4.7–5.4 s. Every transfer succeeded.
-- **Outcome through the ESPHome proxy**: not run yet.
+- **Outcome through the ESPHome proxy**: not run (02-fixes D18). Without it the writes stay at 244 bytes.

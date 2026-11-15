@@ -50,7 +50,7 @@ specs/
    |---|---|---|---|
    | F*n* | Functional requirement, with sub-requirements such as F9.4 | spec | F11 |
    | T*n* | Cross-cutting requirement | spec | T9 |
-   | D*n* | Decision | spec, or the plan of a unit without one | D17 |
+   | D*n* | Decision | spec, or the plan of a unit without one | D19 |
    | P*n* | Problem of the reference integration | 01-base spec | P10 |
    | M*n* | Milestone | plan | M8 |
    | V*n* | Panel check | panel-checks.md | V18 |

@@ -37,9 +37,11 @@ It has been tested on a 32×32 display. Other sizes should work, but the clock s
 
 Power on the display and make sure the phone app isn't connected to it: the display accepts one connection at a time.
 
-Home Assistant discovers displays in range and offers them under **Settings → Devices & services**. You can also choose **Add integration → iPixel Color SE**, and pick a display from the list or enter its Bluetooth address.
+Home Assistant discovers displays in range, by their Bluetooth name (`LED_BLE_…`) or by the vendor's data they advertise, and offers them under **Settings → Devices & services**. You can also choose **Add integration → iPixel Color SE**, and pick a display from the list or enter its Bluetooth address.
 
 The name you give the display prefixes all its entities: "Kitchen Pixel" gives `switch.kitchen_pixel_power`. The examples below use that name.
+
+The device page shows the model with the resolution, the firmware version, read at each connection, and as the model ID the product id the display advertises, for example `000702`. Some displays don't advertise one.
 
 ## Entities
 
@@ -166,7 +168,7 @@ Brightness, the clock and images all turn the screen back on, and Power follows.
 
 Home Assistant stays connected to the display. If the connection drops, usually because the display lost power, it connects again within a few seconds of the display coming back. After a failed attempt it waits 30 seconds.
 
-Every new connection, including the first after Home Assistant starts, puts the display back as it was: time and date, orientation, brightness, and then the screen off if it was off, or the last clock or image. A GIF is sent again each time, so it can take a while to reappear.
+Every new connection, including the first after Home Assistant starts, puts the display back as it was: time and date, orientation, brightness, and then the screen off if it was off, or the last clock or image. A GIF is sent again each time, so it can take a while to reappear. Until then the display may show its own built-in animations. If putting it back fails while the display stays connected, it's tried again after 15 seconds, and otherwise before the next command.
 
 - **Auto reconnect** off: Home Assistant doesn't connect by itself. Any command sent to the display connects again.
 - **Disconnect** closes the connection and turns off Auto reconnect, so you can use the phone app. To give the display back to Home Assistant, turn on Auto reconnect or send it a command.
@@ -177,6 +179,7 @@ Every new connection, including the first after Home Assistant starts, puts the 
 - **Signal strength updates only while the display is disconnected.** The display stops advertising while it's connected, so the sensor keeps its last known value until the next disconnection.
 - **The display doesn't report whether the screen is on, or its brightness.** Home Assistant shows the last state it sent. Changes made in the phone app aren't seen, and the next connection overrides them.
 - **Through an ESPHome proxy**, commands are slower, and on a weak WiFi link a command or an image transfer can fail. The error shows in the UI, and the state is restored at the next connection.
+- **A display locked with a password in the phone app** ignores commands. Home Assistant logs a warning at each connection: remove the password in the app.
 - **Some websites refuse Home Assistant's downloads**, for example with `429 Too Many Requests`, even if the image opens in a browser. Save the image in `config/www` or in your media folder instead.
 - The display has a ninth clock style that isn't available yet.
 
@@ -184,7 +187,7 @@ Every new connection, including the first after Home Assistant starts, puts the 
 
 Open the device, or the integration entry, under **Settings → Devices & services**, and choose **Download diagnostics** from the menu. Please attach the file when you [report a problem](https://github.com/andreabusi/ha-ipixel-color-se/issues).
 
-It holds the display's type, resolution and Bluetooth address, the connection state, the adapter or proxy in use, the signal strength, the desired state of the display and the source of the last image. The query string of an image URL, which may hold a token, is hidden.
+It holds the display's type, resolution and Bluetooth address, its firmware versions, the identity it advertises and whether it's locked with a password, the connection state, the adapter or proxy in use, the signal strength, the desired state of the display and the source of the last image. The query string of an image URL, which may hold a token, is hidden.
 
 For a detailed log, add this to `configuration.yaml`:
 
