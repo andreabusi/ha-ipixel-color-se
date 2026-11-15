@@ -19,7 +19,7 @@ specs/
 | Unit | Documents | Content | Status | Release |
 |---|---|---|---|---|
 | 01-base | [spec](01-base/spec.md), [plan](01-base/plan.md) | Setup, connection and reconnection, power, brightness, orientation, clock, image player, diagnostics | Done | `v0.1.0` |
-| 02-fixes | [plan](02-fixes/plan.md) | Rejected commands, transfer timeouts and write size, restore retry, firmware version, product id, password flag, discovery by manufacturer data | In progress | `v0.2.0` |
+| 02-fixes | [plan](02-fixes/plan.md) | Rejected commands, transfer timeouts and write size, restore retry, firmware version, product id, password flag, discovery by manufacturer data | Done | `v0.2.0` |
 
 ## Analyses
 
