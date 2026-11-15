@@ -19,6 +19,7 @@ specs/
 | Unit | Documents | Content | Status | Release |
 |---|---|---|---|---|
 | 01-base | [spec](01-base/spec.md), [plan](01-base/plan.md) | Setup, connection and reconnection, power, brightness, orientation, clock, image player, diagnostics | Done | `v0.1.0` |
+| 02-fixes | [plan](02-fixes/plan.md) | Rejected commands, transfer timeouts and write size, restore retry, firmware version, product id, password flag, discovery by manufacturer data | Approved | `v0.2.0` |
 
 ## Analyses
 
@@ -30,7 +31,7 @@ specs/
 
 | Document | Content |
 |---|---|
-| [panel-checks.md](panel-checks.md) | Questions that only the real panel can answer, with their outcomes (V1–V12) |
+| [panel-checks.md](panel-checks.md) | Questions that only the real panel can answer, with their outcomes (V1–V18) |
 
 ## Rules
 
@@ -49,10 +50,10 @@ specs/
    |---|---|---|---|
    | F*n* | Functional requirement, with sub-requirements such as F9.4 | spec | F11 |
    | T*n* | Cross-cutting requirement | spec | T9 |
-   | D*n* | Decision | spec | D14 |
+   | D*n* | Decision | spec, or the plan of a unit without one | D17 |
    | P*n* | Problem of the reference integration | 01-base spec | P10 |
-   | M*n* | Milestone | plan | M5 |
-   | V*n* | Panel check | panel-checks.md | V12 |
+   | M*n* | Milestone | plan | M8 |
+   | V*n* | Panel check | panel-checks.md | V18 |
 
    The IDs of an analysis (for example C1 and N1 in the 2026-11-11 comparison) belong to that analysis only. A plan that takes one up cites the analysis.
 5. **Analyses** go in `analysis/`, named `YYYY-MM-DD-topic.md`: research, comparisons, findings. They're snapshots that aren't updated after they're written, and they don't decide anything: a spec or a plan takes up what's useful and makes the decision.
