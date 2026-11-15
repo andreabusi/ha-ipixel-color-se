@@ -15,6 +15,7 @@ from custom_components.ipixel_color_se.const import (
     CONF_DEVICE_TYPE,
     CONF_HEIGHT,
     CONF_WIDTH,
+    MANUFACTURER_ID,
 )
 
 ADDRESS = "AA:BB:CC:DD:EE:FF"
@@ -24,8 +25,16 @@ RSSI = -62
 SOURCE = "00:00:00:00:00:01"
 ADAPTER = f"hci0 ({SOURCE})"
 
-# The real reply of a 32×32 panel to set_time (check V9)
+# The real reply of a 32×32 panel to set_time (check V9). Byte 10 is the
+# password flag, 0 when unlocked (check V15).
 INFO_FRAME = bytes.fromhex("0c 00 01 80 81 11 02 00 00 01 00 01")
+# The real reply of a 32×32 panel to the firmware read: MCU 11.03, WiFi 7.02
+# (check V14)
+FIRMWARE_FRAME = bytes.fromhex("08 00 05 80 0b 03 07 02")
+# The manufacturer data a 32×32 B.K. Light panel advertises: product id
+# 000702, type 0x81 (check V16)
+ADVERTISEMENT = bytes.fromhex("00 72 00 07 02 00 81")
+PRODUCT_ID = "000702"
 
 ENTRY_DATA = {
     CONF_ADDRESS: ADDRESS,
@@ -38,6 +47,7 @@ ENTRY_DATA = {
 # Commands by their id and type bytes, as describe() names them
 _COMMANDS = {
     b"\x01\x80": "set_time",
+    b"\x05\x80": "firmware",
     b"\x04\x80": "brightness",
     b"\x06\x80": "orientation",
     b"\x06\x01": "clock",
@@ -68,8 +78,8 @@ def describe(command: bytes) -> str:
             return "power on" if command[4] else "power off"
         case "brightness" | "orientation" as name:
             return f"{name} {command[4]}"
-        case "set_time":
-            return "set_time"
+        case "set_time" | "firmware" as name:
+            return name
         case "gif" | "png" as name:
             return f"{name}, continued" if command[4] == _CONTINUED else name
         case "clock":
@@ -155,7 +165,8 @@ class FakeBleakClient:
 class FakePanel:
     """A panel that answers like the real one (check V9).
 
-    set_time gets the info frame, every other command an ACK. An image
+    set_time gets the info frame, the firmware read the firmware frame
+    (check V14), every other command an ACK. An image
     window gets an ACK with status 1, or 3 for the last one, and the panel
     then shows the image. Tests change responder, info_frame, rejecting or
     the error attributes to simulate failures.
@@ -173,6 +184,8 @@ class FakePanel:
         self.powered = True
         self.screen_on = True
         self.info_frame = INFO_FRAME
+        self.firmware_frame: bytes | None = FIRMWARE_FRAME
+        """The reply to the firmware read; None doesn't answer it."""
         self.connect_error: Exception | None = None
         self.notify_error: Exception | None = None
         self.write_error: Exception | None = None
@@ -237,6 +250,8 @@ class FakePanel:
             case "set_time":
                 self.screen_on = True
                 return [self.info_frame]
+            case "firmware":
+                return [self.firmware_frame] if self.firmware_frame else []
             case "gif" | "png":
                 return [ack(data, self.receive_window(data))]
         if self._rejects(name):
@@ -279,13 +294,19 @@ class FakePanel:
         connectable: bool = True,
         rssi: int = RSSI,
         source: str = SOURCE,
+        manufacturer_data: dict[int, bytes] | None = None,
     ) -> None:
         """Advertise, as the panel does while powered and not connected (check V4).
 
         Like HA's Bluetooth manager, call the callbacks before recording the
         advertisement: until then the panel can't be looked up.
         """
-        info = service_info(connectable=connectable, rssi=rssi, source=source)
+        info = service_info(
+            connectable=connectable,
+            rssi=rssi,
+            source=source,
+            manufacturer_data=manufacturer_data,
+        )
         for callback in list(self.advertisement_callbacks):
             callback(info)
         if connectable:
@@ -378,16 +399,21 @@ def service_info(
     name: str = BLE_NAME,
     service_uuids: list[str] | None = None,
     *,
+    manufacturer_data: dict[int, bytes] | None = None,
     connectable: bool = True,
     rssi: int = RSSI,
     source: str = SOURCE,
 ) -> BluetoothServiceInfoBleak:
-    """Return an advertisement like the panel's."""
+    """Return an advertisement like the panel's (check V16)."""
     return BluetoothServiceInfoBleak(
         name=name,
         address=address,
         rssi=rssi,
-        manufacturer_data={21076: bytes.fromhex("00 72 00 07 02 00 81")},
+        manufacturer_data=(
+            {MANUFACTURER_ID: ADVERTISEMENT}
+            if manufacturer_data is None
+            else manufacturer_data
+        ),
         service_data={},
         service_uuids=service_uuids or [],
         source=source,

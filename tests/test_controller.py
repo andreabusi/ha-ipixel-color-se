@@ -6,6 +6,7 @@ import dataclasses
 from datetime import timedelta
 import logging
 from pathlib import Path
+from unittest.mock import patch
 
 from bleak.exc import BleakError
 from freezegun.api import FrozenDateTimeFactory
@@ -18,6 +19,7 @@ from homeassistant.const import (
 )
 from homeassistant.core import CoreState, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.util import dt as dt_util
 import pytest
 from pytest_homeassistant_custom_component.common import (
@@ -29,7 +31,11 @@ from custom_components.ipixel_color_se import (
     connection as connection_module,
     protocol,
 )
-from custom_components.ipixel_color_se.const import DOMAIN
+from custom_components.ipixel_color_se.const import (
+    CONF_PRODUCT_ID,
+    DOMAIN,
+    MANUFACTURER_ID,
+)
 from custom_components.ipixel_color_se.controller import (
     RECONNECT_COOLDOWN,
     RESTORE_RETRY_DELAY,
@@ -46,6 +52,9 @@ from custom_components.ipixel_color_se.state import (
 
 from .common import (
     ADAPTER,
+    ADDRESS,
+    INFO_FRAME,
+    PRODUCT_ID,
     RSSI,
     FakePanel,
     ack,
@@ -68,9 +77,13 @@ CLOCK_STYLE = "select.kitchen_pixel_clock_style"
 
 # Logged when the retry of a failed restore is due
 RETRYING = "Retrying the restore of AA:BB:CC:DD:EE:FF"
+# Warned when the panel is locked with a password
+LOCKED = "AA:BB:CC:DD:EE:FF is locked with a password from the phone app"
 
 # What a new connection sends when nothing was ever set
 DEFAULT_RESTORE = ["set_time", "orientation 0", "power on"]
+# The firmware read, after the restore on each connection (02-fixes plan §3.5)
+FIRMWARE = "firmware"
 # The clock with the default options
 CLOCK = "clock 1 24h date"
 
@@ -160,7 +173,7 @@ async def test_first_connection_restores_only_what_was_set(
     """A brightness never set isn't sent: the panel keeps its own."""
     await start(hass, mock_config_entry)
 
-    assert mock_panel.commands == DEFAULT_RESTORE
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE]
 
 
 async def test_restore_order(
@@ -183,6 +196,7 @@ async def test_restore_order(
         "orientation 2",
         "brightness 40",
         "power off",
+        FIRMWARE,
     ]
     assert not mock_panel.screen_on
 
@@ -224,7 +238,7 @@ async def test_restore_shows_the_clock(
 
     await start(hass, mock_config_entry)
 
-    assert mock_panel.commands == ["set_time", "orientation 0", content]
+    assert mock_panel.commands == ["set_time", "orientation 0", content, FIRMWARE]
     assert mock_panel.screen_on is power
 
 
@@ -241,9 +255,9 @@ async def test_clock_shows_ha_local_date(
 
     await start(hass, mock_config_entry)
 
-    assert mock_panel.commands == ["set_time", "orientation 0", CLOCK]
+    assert mock_panel.commands == ["set_time", "orientation 0", CLOCK, FIRMWARE]
     assert panel_time(mock_panel.writes[0]) == "00:30:00"
-    assert panel_date(mock_panel.writes[-1]) == "08/11/26 7"
+    assert panel_date(mock_panel.writes[2]) == "08/11/26 7"
 
 
 async def test_power_cycle_turns_the_screen_off_again(
@@ -267,7 +281,7 @@ async def test_power_cycle_turns_the_screen_off_again(
     await settle(hass)
 
     assert hass.states.get(CONNECTED).state == STATE_ON
-    assert mock_panel.commands == ["set_time", "orientation 0", "power off"]
+    assert mock_panel.commands == ["set_time", "orientation 0", "power off", FIRMWARE]
     assert not mock_panel.screen_on
     assert hass.states.get(POWER).state == STATE_OFF
     assert "Reconnected to" in caplog.text
@@ -287,7 +301,12 @@ async def test_power_cycle_brings_the_clock_back(
     mock_panel.power_on()
     await settle(hass)
 
-    assert mock_panel.commands == ["set_time", "orientation 0", "clock 5 24h date"]
+    assert mock_panel.commands == [
+        "set_time",
+        "orientation 0",
+        "clock 5 24h date",
+        FIRMWARE,
+    ]
 
 
 @pytest.mark.usefixtures("no_ack_wait")
@@ -308,7 +327,7 @@ async def test_failed_restore_is_retried_before_the_next_command(
     mock_panel.writes.clear()
     await controller.async_set_brightness(40)
 
-    assert mock_panel.commands == [*DEFAULT_RESTORE, "brightness 40"]
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE, "brightness 40"]
 
     # Restored now: the next command goes alone
     mock_panel.writes.clear()
@@ -338,7 +357,7 @@ async def test_failed_restore_is_retried(
 
     await fire_after(hass, RESTORE_RETRY_DELAY + 1)
     assert RETRYING in caplog.text
-    assert mock_panel.commands == DEFAULT_RESTORE
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE]
     assert "failed again" not in caplog.text
 
 
@@ -361,7 +380,7 @@ async def test_restore_is_retried_once(
 
     mock_panel.write_error = None
     await controller.async_set_brightness(40)
-    assert mock_panel.commands == [*DEFAULT_RESTORE, "brightness 40"]
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE, "brightness 40"]
 
 
 async def test_restore_retry_after_a_command_restored_the_panel(
@@ -462,7 +481,7 @@ async def test_commands_wait_for_the_restore(
 
     await mock_config_entry.runtime_data.async_set_brightness(40)
 
-    assert mock_panel.commands == [*DEFAULT_RESTORE, "brightness 40"]
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE, "brightness 40"]
 
 
 # Simple commands and the power rules (plan §5, F5.3)
@@ -735,7 +754,12 @@ async def test_clock_options_wait_for_the_connection(
     mock_panel.writes.clear()
     mock_panel.power_on()
     await settle(hass)
-    assert mock_panel.commands == ["set_time", "orientation 0", "clock 3 24h date"]
+    assert mock_panel.commands == [
+        "set_time",
+        "orientation 0",
+        "clock 3 24h date",
+        FIRMWARE,
+    ]
 
 
 async def test_clock_options_dont_take_the_panel_back(
@@ -824,7 +848,7 @@ async def test_sync_time_connects(
     await controller.async_sync_time()
 
     assert mock_panel.connected
-    assert mock_panel.commands == [*DEFAULT_RESTORE, "set_time"]
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE, "set_time"]
 
 
 @pytest.mark.parametrize(
@@ -965,7 +989,7 @@ async def test_reconnects_on_the_first_advertisement(
     await settle(hass)
 
     assert mock_panel.connected
-    assert mock_panel.commands == DEFAULT_RESTORE
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE]
 
 
 async def test_ignores_advertisements_it_cant_connect_through(
@@ -1017,7 +1041,7 @@ async def test_a_command_connects_during_the_pause(
     await controller.async_set_brightness(40)
 
     assert mock_panel.connect_attempts == 2
-    assert mock_panel.commands == [*DEFAULT_RESTORE, "brightness 40"]
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE, "brightness 40"]
 
 
 async def test_disconnect_frees_the_panel(
@@ -1067,7 +1091,7 @@ async def test_command_reconnects_after_disconnect(
     await controller.async_set_brightness(40)
 
     assert mock_panel.connected
-    assert mock_panel.commands == [*DEFAULT_RESTORE, "brightness 40"]
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE, "brightness 40"]
     assert not controller.state.auto_reconnect
 
 
@@ -1247,7 +1271,7 @@ async def test_restore_shows_the_image(
 
     await start(hass, mock_config_entry)
 
-    assert mock_panel.commands == ["set_time", "orientation 0", content]
+    assert mock_panel.commands == ["set_time", "orientation 0", content, FIRMWARE]
     assert mock_panel.screen_on is power
 
 
@@ -1264,7 +1288,7 @@ async def test_restore_falls_back_to_the_clock(
 
     controller = await start(hass, mock_config_entry)
 
-    assert mock_panel.commands == ["set_time", "orientation 0", CLOCK]
+    assert mock_panel.commands == ["set_time", "orientation 0", CLOCK, FIRMWARE]
     assert controller.state.mode is Mode.CLOCK
     # Kept, for Play
     assert controller.state.image == CAT
@@ -1284,13 +1308,19 @@ async def test_restore_waits_for_ha_to_start(
     hass.set_state(CoreState.starting)
 
     await start(hass, mock_config_entry)
-    assert mock_panel.commands == ["set_time", "orientation 0", "power on"]
+    assert mock_panel.commands == ["set_time", "orientation 0", "power on", FIRMWARE]
 
     hass.set_state(CoreState.running)
     hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
     await settle(hass)
 
-    assert mock_panel.commands == ["set_time", "orientation 0", "power on", "gif"]
+    assert mock_panel.commands == [
+        "set_time",
+        "orientation 0",
+        "power on",
+        FIRMWARE,
+        "gif",
+    ]
 
 
 @pytest.mark.usefixtures("cat")
@@ -1335,7 +1365,7 @@ async def test_power_cycle_brings_the_image_back(
     mock_panel.power_on()
     await settle(hass)
 
-    assert mock_panel.commands == ["set_time", "orientation 0", "gif"]
+    assert mock_panel.commands == ["set_time", "orientation 0", "gif", FIRMWARE]
     assert mock_panel.image is not None
 
 
@@ -1369,7 +1399,7 @@ async def test_power_on_after_a_power_cycle_sends_the_image(
     mock_panel.writes.clear()
     mock_panel.power_on()
     await settle(hass)
-    assert mock_panel.commands == ["set_time", "orientation 0", "power off"]
+    assert mock_panel.commands == ["set_time", "orientation 0", "power off", FIRMWARE]
     assert not mock_panel.screen_on
 
     mock_panel.writes.clear()
@@ -1502,7 +1532,7 @@ async def test_image_fit_waits_for_the_connection(
     mock_panel.writes.clear()
     mock_panel.power_on()
     await settle(hass)
-    assert mock_panel.commands == ["set_time", "orientation 0", "gif"]
+    assert mock_panel.commands == ["set_time", "orientation 0", "gif", FIRMWARE]
 
 
 async def test_image_fit_with_a_source_gone(
@@ -1620,7 +1650,7 @@ async def test_media_source_image_survives_a_restart(
         "media_id": "media-source://media_source/local/cat.gif",
         "title": "cat.gif",
     }
-    assert mock_panel.commands == ["set_time", "orientation 0", "gif"]
+    assert mock_panel.commands == ["set_time", "orientation 0", "gif", FIRMWARE]
 
 
 async def disconnected_controller(
@@ -1753,3 +1783,187 @@ async def test_adapter_is_kept_after_disconnecting(
 
     assert not controller.connected
     assert controller.adapter == ADAPTER
+
+
+# Panel identity (02-fixes plan §3.5-§3.7)
+
+
+def device(hass: HomeAssistant, entry: MockConfigEntry) -> dr.DeviceEntry:
+    """Return the display's device."""
+    found = dr.async_get(hass).async_get_device_by_identifier(
+        (DOMAIN, ADDRESS), entry.entry_id
+    )
+    assert found is not None
+    return found
+
+
+async def reconnect(hass: HomeAssistant, panel: FakePanel) -> None:
+    """Cut the panel's power and give it back, waiting for the reconnection."""
+    panel.lose_power()
+    await hass.async_block_till_done()
+    panel.writes.clear()
+    panel.power_on()
+    await settle(hass)
+
+
+async def test_firmware_version_on_the_device_page(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """The firmware is read after the restore: the MCU version is the device's."""
+    controller = await start(hass, mock_config_entry)
+
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE]
+    assert controller.firmware == protocol.FirmwareVersions(mcu="11.03", wifi="7.02")
+    assert device(hass, mock_config_entry).sw_version == "11.03"
+
+
+async def test_firmware_is_read_once_per_connection(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Another restore on the same connection skips it, a new connection reads it."""
+    controller = await start(hass, mock_config_entry)
+    await controller.async_show_clock()
+    # A clock option the panel rejects calls for a restore before the next command
+    mock_panel.rejecting = {"clock": 1}
+    with pytest.raises(HomeAssistantError):
+        await controller.async_set_clock(style=2)
+    mock_panel.writes.clear()
+
+    await controller.async_set_brightness(40)
+    assert mock_panel.commands == [
+        "set_time",
+        "orientation 0",
+        "clock 2 24h date",
+        "brightness 40",
+    ]
+
+    mock_panel.firmware_frame = bytes.fromhex("08 00 05 80 0b 04 07 02")
+    await reconnect(hass, mock_panel)
+    assert mock_panel.commands[-1] == FIRMWARE
+    assert device(hass, mock_config_entry).sw_version == "11.04"
+
+
+@pytest.mark.usefixtures("no_ack_wait")
+@pytest.mark.parametrize(
+    "reply", [None, bytes.fromhex("06 00 05 80 0b 03")], ids=["none", "short"]
+)
+async def test_firmware_not_told_isnt_asked_again(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    reply: bytes | None,
+) -> None:
+    """A panel that doesn't tell its versions costs the wait only once.
+
+    The restore isn't affected: the screen already has its content.
+    """
+    caplog.set_level(logging.DEBUG)
+    mock_panel.firmware_frame = reply
+    controller = await start(hass, mock_config_entry)
+
+    assert "doesn't tell its firmware versions, not asking again" in caplog.text
+    assert controller.connected
+    assert controller.last_error is None
+    assert controller.firmware is None
+    assert controller.firmware_frame == reply
+    assert device(hass, mock_config_entry).sw_version is None
+
+    await reconnect(hass, mock_panel)
+    assert mock_panel.commands == DEFAULT_RESTORE
+
+
+async def test_firmware_read_cut_by_a_drop_is_asked_again(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """A connection lost during the read leaves it to the next connection."""
+
+    def drop_at_the_firmware_read(data: bytes) -> list[bytes]:
+        if describe(data) != FIRMWARE:
+            return mock_panel.answer(data)
+        asyncio.get_running_loop().call_soon(mock_panel.client.drop)
+        return []
+
+    mock_panel.responder = drop_at_the_firmware_read
+    controller = await start(hass, mock_config_entry)
+    assert not controller.connected
+    assert controller.firmware is None
+
+    mock_panel.responder = mock_panel.answer
+    mock_panel.writes.clear()
+    mock_panel.advertise()
+    await settle(hass)
+
+    assert mock_panel.commands == [*DEFAULT_RESTORE, FIRMWARE]
+    assert controller.firmware is not None
+
+
+async def test_product_id_from_the_last_advertisement(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """An entry without the product id gets it at startup.
+
+    The panel is silent once connected (check V4): HA's last advertisement
+    has it.
+    """
+    assert CONF_PRODUCT_ID not in mock_config_entry.data
+
+    controller = await start(hass, mock_config_entry)
+
+    assert mock_config_entry.data[CONF_PRODUCT_ID] == PRODUCT_ID
+    assert device(hass, mock_config_entry).model_id == PRODUCT_ID
+    assert controller.advertised == protocol.AdvertisedIdentity(
+        cid="0007", pid="02", device_type=0x81
+    )
+
+
+async def test_product_id_is_written_only_when_it_changes(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """Every advertisement is read, from any scanner: only a new id is saved."""
+    await disconnected_controller(hass, mock_config_entry)
+
+    with patch.object(
+        hass.config_entries,
+        "async_update_entry",
+        wraps=hass.config_entries.async_update_entry,
+    ) as update_entry:
+        mock_panel.advertise()
+        mock_panel.advertise(connectable=False)
+        # Without one, the last product id stays
+        mock_panel.advertise(manufacturer_data={})
+        assert not update_entry.called
+
+        mock_panel.advertise(
+            connectable=False,
+            manufacturer_data={MANUFACTURER_ID: bytes.fromhex("00 72 00 07 03 00 81")},
+        )
+
+    assert update_entry.call_count == 1
+    assert mock_config_entry.data[CONF_PRODUCT_ID] == "000703"
+    assert device(hass, mock_config_entry).model_id == "000703"
+
+
+@pytest.mark.parametrize(
+    ("flag", "warnings"), [(0, 0), (1, 1)], ids=["unlocked", "locked"]
+)
+async def test_password_flag(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+    flag: int,
+    warnings: int,
+) -> None:
+    """A locked panel gets a warning per connection, and commands still go (D16)."""
+    mock_panel.info_frame = INFO_FRAME[:10] + bytes([flag]) + INFO_FRAME[11:]
+    controller = await start(hass, mock_config_entry)
+    await controller.async_sync_time()
+    await controller.async_set_brightness(40)
+
+    assert controller.password_protected is bool(flag)
+    assert caplog.text.count(LOCKED) == warnings
+    assert controller.state.brightness == 40
+
+    await reconnect(hass, mock_panel)
+    assert caplog.text.count(LOCKED) == 2 * warnings

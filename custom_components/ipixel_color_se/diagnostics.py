@@ -27,9 +27,27 @@ async def async_get_config_entry_diagnostics(
     if image := state["image"]:
         # The query string of a URL may hold a token
         image["media_id"] = redact_url(image["media_id"], REDACTED)
+    firmware = controller.firmware
+    frame = controller.firmware_frame
+    advertised = controller.advertised
     return {
         "entry": {"title": entry.title, "data": dict(entry.data)},
         "state": state,
+        "panel": {
+            "firmware": {
+                "mcu": firmware and firmware.mcu,
+                "wifi": firmware and firmware.wifi,
+                "frame": frame and frame.hex(" "),
+            },
+            "advertised": advertised
+            and {
+                "cid": advertised.cid,
+                "pid": advertised.pid,
+                "product_id": advertised.product_id,
+                "device_type": advertised.device_type,
+            },
+            "password_protected": controller.password_protected,
+        },
         "connection": {
             "connected": controller.connected,
             "reachable": controller.reachable,

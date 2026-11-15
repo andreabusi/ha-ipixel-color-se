@@ -21,16 +21,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.event import async_call_later, async_track_time_change
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from . import image_source, protocol
-from .connection import IPixelConnection, IPixelError
-from .const import CONF_DEVICE_TYPE, CONF_HEIGHT, CONF_WIDTH, DOMAIN
+from .connection import IPixelConnection, IPixelConnectionError, IPixelError
+from .const import CONF_DEVICE_TYPE, CONF_HEIGHT, CONF_PRODUCT_ID, CONF_WIDTH, DOMAIN
 from .image_source import ImageData
-from .protocol import PanelInfo, SendPlan
+from .protocol import AdvertisedIdentity, FirmwareVersions, PanelInfo, SendPlan
 from .state import DisplayState, ImageFit, ImageRef, Mode
 
 _LOGGER = logging.getLogger(__name__)
@@ -101,6 +102,13 @@ class IPixelController:
         """
         self.adapter: str | None = None
         """The adapter or proxy of the current or last connection."""
+        self.firmware: FirmwareVersions | None = None
+        self.firmware_frame: bytes | None = None
+        """The panel's last reply to the firmware read, even one not understood."""
+        self.advertised: AdvertisedIdentity | None = None
+        """The identity in the last advertisement heard, if it has one."""
+        self.password_protected: bool | None = None
+        """Whether the last info reply said the panel is locked, if it says."""
         self._connection = IPixelConnection(
             hass,
             self.address,
@@ -125,6 +133,11 @@ class IPixelController:
         self._lost = False
         self._stopped = False
         self._hass_started = False
+        # Whether the firmware was read on this connection, and whether the
+        # panel failed to tell it, which stops asking until the entry reloads
+        self._firmware_read = False
+        self._firmware_unsupported = False
+        self._password_warned = False
         # Image transfers in progress, including reading the image
         self._transfers = 0
         # The image and fit the panel got on this connection, if it shows one
@@ -226,6 +239,7 @@ class IPixelController:
         last = async_last_service_info(self.hass, self.address, connectable=True)
         if last is not None:
             self.rssi = last.rssi
+            self._async_record_identity(last)
             self._async_notify()
         self._async_set_reachable(
             async_address_present(self.hass, self.address, connectable=True)
@@ -461,6 +475,43 @@ class IPixelController:
         else:
             await send(protocol.power(False))
         self._needs_restore = False
+        await self._async_read_firmware()
+
+    async def _async_read_firmware(self) -> None:
+        """Read the firmware versions, once per connection (02-fixes plan §3.5).
+
+        After the restore, because it isn't part of it: the screen gets its
+        content first, and a failure here doesn't fail the restore. A panel
+        that doesn't tell its versions isn't asked again until the entry
+        reloads, so it doesn't cost 8 s on every connection. The MCU version
+        goes on the device page. Call with the lock held.
+        """
+        if self._firmware_read or self._firmware_unsupported:
+            return
+        self._firmware_read = True
+        try:
+            frame = await self._connection.async_request(protocol.firmware_versions())
+            self.firmware_frame = frame
+            self.firmware = protocol.parse_firmware_versions(frame)
+        except IPixelConnectionError as err:
+            # The next connection asks again
+            _LOGGER.debug("Can't read the firmware of %s: %s", self.address, err)
+            return
+        except (IPixelError, ValueError) as err:
+            _LOGGER.debug(
+                "%s doesn't tell its firmware versions, not asking again: %s",
+                self.address,
+                err,
+            )
+            self._firmware_unsupported = True
+            return
+        _LOGGER.debug(
+            "Firmware of %s: MCU %s, WiFi %s",
+            self.address,
+            self.firmware.mcu,
+            self.firmware.wifi,
+        )
+        self._async_update_device(sw_version=self.firmware.mcu)
 
     async def _async_show_content(self, *, sync_time: bool = True) -> None:
         """Turn the screen on, showing the content again. Call with the lock held.
@@ -554,8 +605,32 @@ class IPixelController:
         )
 
     async def _async_send_time(self) -> None:
-        """Set the panel's time to HA's (F6.4). Call with the lock held."""
-        await self._connection.async_request(protocol.set_time(dt_util.now()))
+        """Set the panel's time to HA's (F6.4). Call with the lock held.
+
+        The panel answers with its info, whose password flag is checked.
+        """
+        frame = await self._connection.async_request(protocol.set_time(dt_util.now()))
+        self._async_check_password(frame)
+
+    @callback
+    def _async_check_password(self, info_frame: bytes) -> None:
+        """Warn once per connection if the panel is locked (02-fixes plan §3.7).
+
+        Commands still go: a misread flag would block them all (D16).
+        """
+        try:
+            locked = protocol.parse_panel_info(info_frame).password_protected
+        except ValueError as err:
+            _LOGGER.debug("Unexpected info from %s: %s", self.address, err)
+            return
+        self.password_protected = locked
+        if locked and not self._password_warned:
+            self._password_warned = True
+            _LOGGER.warning(
+                "%s is locked with a password from the phone app, and ignores "
+                "commands until it's removed",
+                self.address,
+            )
 
     async def _async_sync_time(self, *, with_date: bool) -> None:
         """Send HA's time and, if with_date, the clock with today's date.
@@ -740,6 +815,7 @@ class IPixelController:
 
         Called for every advertisement, once per scanner that hears it.
         """
+        self._async_record_identity(service_info)
         if not service_info.connectable:
             return
         self._async_record_rssi(service_info)
@@ -767,6 +843,35 @@ class IPixelController:
             self._async_notify()
 
     @callback
+    def _async_record_identity(self, service_info: BluetoothServiceInfoBleak) -> None:
+        """Keep the identity the panel advertises (02-fixes plan §3.6).
+
+        The panel is silent while connected (check V4), so entry.data keeps
+        the product id across restarts. It's written only when it changes:
+        every write saves the config entries. It's the device's model id.
+        """
+        identity = protocol.parse_advertisement(service_info.manufacturer_data)
+        if identity is None:
+            return
+        self.advertised = identity
+        product_id = identity.product_id
+        if self.entry.data.get(CONF_PRODUCT_ID) != product_id:
+            self.hass.config_entries.async_update_entry(
+                self.entry, data={**self.entry.data, CONF_PRODUCT_ID: product_id}
+            )
+            self._async_update_device(model_id=product_id)
+
+    @callback
+    def _async_update_device(self, **changes: str) -> None:
+        """Change the device in the registry. Unchanged values write nothing."""
+        registry = dr.async_get(self.hass)
+        device = registry.async_get_device_by_identifier(
+            (DOMAIN, self.address), self.entry.entry_id
+        )
+        if device is not None:
+            registry.async_update_device(device.id, **changes)
+
+    @callback
     def _async_unavailable(self, _service_info: BluetoothServiceInfoBleak) -> None:
         """Record that HA's Bluetooth no longer sees the panel."""
         self._async_set_reachable(False)
@@ -786,6 +891,8 @@ class IPixelController:
         self.adapter = self._connection.adapter
         self._needs_restore = True
         self._image_sent = None
+        self._firmware_read = False
+        self._password_warned = False
         if self._lost:
             self._lost = False
             _LOGGER.info("Reconnected to %s", self.address)

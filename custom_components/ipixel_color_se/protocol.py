@@ -7,6 +7,7 @@ pypixelcolor only builds the bytes: the transport is ours (connection.py).
 Everything here is pure: no Home Assistant, no I/O.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from io import BytesIO
@@ -25,6 +26,7 @@ from pypixelcolor.commands.set_time import set_time as _set_time
 from pypixelcolor.lib.device_info import DEVICE_TYPE_MAP, LED_SIZE_MAP
 from pypixelcolor.lib.transport.send_plan import SendPlan as _PixelSendPlan
 
+from .const import MANUFACTURER_DATA_START, MANUFACTURER_ID
 from .state import ImageFit
 
 # ACK status bytes, 05 00 xx xx <status> (check V13): the panel rejected the
@@ -35,13 +37,23 @@ ACK_OK = 1
 ACK_DONE = 3
 
 # How long to wait for each ACK. Simple commands answer in about 30 ms
-# (check V9). An image window's ACK came 15-47 ms after its writes through
-# the USB adapter (check V17); through a proxy with a weak WiFi link it took
-# seconds. Provisional until V17 measures the proxy (02-fixes plan §3.2).
+# (check V9). An image window's ACK comes 0-48 ms after its writes, through
+# the USB adapter and through a working ESPHome proxy (check V17); through a
+# proxy with a weak WiFi link it took seconds (02-fixes plan §3.2).
 ACK_TIMEOUT = 8.0
 TRANSFER_ACK_TIMEOUT = 20.0
 
 _PANEL_INFO_COMMAND = b"\x01\x80"
+# The info reply's password flag (check V15), in replies long enough
+_PASSWORD_FLAG = 10
+
+# The firmware read, 04 00 05 80, and its reply (check V14)
+_FIRMWARE_COMMAND = b"\x05\x80"
+_FIRMWARE_REQUEST = b"\x04\x00" + _FIRMWARE_COMMAND
+_FIRMWARE_FRAME_LENGTH = 8
+
+# Manufacturer data: 00 72 <cid> <cid> <pid> <?> <type> (check V16)
+_ADVERTISEMENT_LENGTH = 7
 
 _RESIZE_METHODS = {ImageFit.FILL: _ResizeMethod.CROP, ImageFit.FIT: _ResizeMethod.FIT}
 # What Pillow may raise on data it can't decode
@@ -94,11 +106,35 @@ class SendPlan:
 
 @dataclass(frozen=True, slots=True)
 class PanelInfo:
-    """Fixed facts about a panel, from its info reply."""
+    """What a panel's info reply says: its type and resolution never change."""
 
     device_type: int
     width: int
     height: int
+    password_protected: bool | None = None
+    """Whether the phone app locked the panel with a password, if the reply says."""
+
+
+@dataclass(frozen=True, slots=True)
+class FirmwareVersions:
+    """A panel's firmware versions, written as the vendor app shows them."""
+
+    mcu: str
+    wifi: str
+
+
+@dataclass(frozen=True, slots=True)
+class AdvertisedIdentity:
+    """What a panel's manufacturer data says about it."""
+
+    cid: str
+    pid: str
+    device_type: int
+
+    @property
+    def product_id(self) -> str:
+        """Return the product id, the cid followed by the pid: 000702."""
+        return self.cid + self.pid
 
 
 def power(on: bool) -> SendPlan:
@@ -146,6 +182,19 @@ def set_time(now: datetime) -> SendPlan:
     expects a response instead.
     """
     return _convert(_set_time(now.hour, now.minute, now.second), response=True)
+
+
+def firmware_versions() -> SendPlan:
+    """Ask for the firmware versions, which the panel sends as a response.
+
+    pypixelcolor has no command for it: the bytes come from the vendor app,
+    and the panel answers in 30-60 ms without changing the screen (check V14).
+    """
+    return SendPlan(
+        name="firmware_versions",
+        windows=(Window(data=_FIRMWARE_REQUEST, ack=False),),
+        response=True,
+    )
 
 
 def image(data: bytes, fit: ImageFit, width: int, height: int) -> SendPlan:
@@ -216,8 +265,10 @@ def parse_panel_info(frame: bytes) -> PanelInfo:
     """Decode the panel's reply to set_time.
 
     The reply looks like 0c 00 01 80 <type> …: the type byte selects the
-    resolution. Raise ValueError if the frame isn't an info reply or the type
-    is unknown; pypixelcolor would silently assume a 64 by 64 panel.
+    resolution. Byte 10, in a reply long enough, is 1 when the panel is
+    locked with a password; our unlocked panel sends 0 (check V15). Raise
+    ValueError if the frame isn't an info reply or the type is unknown;
+    pypixelcolor would silently assume a 64 by 64 panel.
     """
     if len(frame) < 5 or frame[2:4] != _PANEL_INFO_COMMAND:
         raise ValueError(f"Not a panel info frame: {frame.hex(' ')}")
@@ -225,7 +276,52 @@ def parse_panel_info(frame: bytes) -> PanelInfo:
     if (led_type := DEVICE_TYPE_MAP.get(device_type)) is None:
         raise ValueError(f"Unknown panel type 0x{device_type:02x}")
     width, height = LED_SIZE_MAP[led_type]
-    return PanelInfo(device_type=device_type, width=width, height=height)
+    return PanelInfo(
+        device_type=device_type,
+        width=width,
+        height=height,
+        password_protected=(
+            frame[_PASSWORD_FLAG] == 1 if len(frame) > _PASSWORD_FLAG else None
+        ),
+    )
+
+
+def parse_firmware_versions(frame: bytes) -> FirmwareVersions:
+    """Decode the reply to firmware_versions.
+
+    The reply is 08 00 05 80 <MCU major> <MCU minor> <WiFi major> <WiFi
+    minor>. Each version is written as the vendor app does, with the minor
+    on two digits: 0b 03 is 11.03. Raise ValueError for any other frame.
+    """
+    if len(frame) < _FIRMWARE_FRAME_LENGTH or frame[2:4] != _FIRMWARE_COMMAND:
+        raise ValueError(f"Not a firmware versions frame: {frame.hex(' ')}")
+    return FirmwareVersions(
+        mcu=f"{frame[4]}.{frame[5]:02}", wifi=f"{frame[6]}.{frame[7]:02}"
+    )
+
+
+def parse_advertisement(
+    manufacturer_data: Mapping[int, bytes],
+) -> AdvertisedIdentity | None:
+    """Decode the identity a panel advertises, or None if it advertises none.
+
+    The vendor's manufacturer data is 00 72 <cid> <cid> <pid> <?> <type>.
+    The vendor app writes each cid byte in decimal, joins the two and pads
+    them to 4 digits, and the pid to 2 digits: 00 07 02 is cid 0007 and pid
+    02. Some panels advertise only their name.
+    """
+    payload = manufacturer_data.get(MANUFACTURER_ID)
+    if (
+        payload is None
+        or len(payload) < _ADVERTISEMENT_LENGTH
+        or not payload.startswith(MANUFACTURER_DATA_START)
+    ):
+        return None
+    return AdvertisedIdentity(
+        cid=f"{payload[2]}{payload[3]}".rjust(4, "0"),
+        pid=f"{payload[4]:02}",
+        device_type=payload[6],
+    )
 
 
 def ack_status(frame: bytes, command: bytes | None = None) -> int | None:

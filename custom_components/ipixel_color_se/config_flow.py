@@ -25,9 +25,12 @@ from .connection import IPixelConnection, IPixelError
 from .const import (
     CONF_DEVICE_TYPE,
     CONF_HEIGHT,
+    CONF_PRODUCT_ID,
     CONF_WIDTH,
     DOMAIN,
     LOCAL_NAME_PREFIX,
+    MANUFACTURER_DATA_START,
+    MANUFACTURER_ID,
     SERVICE_UUID,
 )
 
@@ -53,6 +56,9 @@ def is_ipixel(service_info: BluetoothServiceInfoBleak) -> bool:
     return (
         service_info.name.startswith(LOCAL_NAME_PREFIX)
         or SERVICE_UUID in service_info.service_uuids
+        or service_info.manufacturer_data.get(MANUFACTURER_ID, b"").startswith(
+            MANUFACTURER_DATA_START
+        )
     )
 
 
@@ -88,6 +94,7 @@ class IPixelConfigFlow(ConfigFlow, domain=DOMAIN):
         """Start with no display chosen."""
         self._address = ""
         self._ble_name = ""
+        self._product_id: str | None = None
         self._discovered: dict[str, BluetoothServiceInfoBleak] = {}
 
     async def async_step_bluetooth(
@@ -98,6 +105,7 @@ class IPixelConfigFlow(ConfigFlow, domain=DOMAIN):
         self._abort_if_unique_id_configured()
         self._address = discovery_info.address
         self._ble_name = discovery_info.name
+        self._product_id = _product_id(discovery_info)
         self.context["title_placeholders"] = {"name": discovery_info.name}
         return await self.async_step_bluetooth_confirm()
 
@@ -139,6 +147,7 @@ class IPixelConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             self._address = address
             self._ble_name = self._discovered[address].name
+            self._product_id = _product_id(self._discovered[address])
             return await self.async_step_bluetooth_confirm()
 
         configured = self._async_current_ids(include_ignore=False)
@@ -210,13 +219,20 @@ class IPixelConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.exception("Unexpected error setting up %s", address)
             errors["base"] = "unknown"
         else:
-            return self.async_create_entry(
-                title=name,
-                data={
-                    CONF_ADDRESS: address,
-                    CONF_DEVICE_TYPE: info.device_type,
-                    CONF_WIDTH: info.width,
-                    CONF_HEIGHT: info.height,
-                },
-            )
+            data = {
+                CONF_ADDRESS: address,
+                CONF_DEVICE_TYPE: info.device_type,
+                CONF_WIDTH: info.width,
+                CONF_HEIGHT: info.height,
+            }
+            # A panel added by hand gets it from its first advertisement
+            if self._product_id is not None:
+                data[CONF_PRODUCT_ID] = self._product_id
+            return self.async_create_entry(title=name, data=data)
         return None
+
+
+def _product_id(service_info: BluetoothServiceInfoBleak) -> str | None:
+    """Return the product id a panel advertises, if any."""
+    identity = protocol.parse_advertisement(service_info.manufacturer_data)
+    return identity and identity.product_id

@@ -34,8 +34,8 @@ async def test_setup_connects(
     assert {"bluetooth_adapters", "media_source"} <= hass.config.components
     assert mock_panel.connected
     assert hass.states.get(CONNECTED).state == STATE_ON
-    # Every connection restores the desired state
-    assert mock_panel.commands == ["set_time", "orientation 0", "power on"]
+    # Every connection restores the desired state, then reads the firmware
+    assert mock_panel.commands == ["set_time", "orientation 0", "power on", "firmware"]
 
 
 async def test_setup_without_the_panel(

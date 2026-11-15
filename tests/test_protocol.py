@@ -10,7 +10,7 @@ import pytest
 from custom_components.ipixel_color_se import protocol
 from custom_components.ipixel_color_se.state import ImageFit
 
-from .common import INFO_FRAME, gif, noise_gif, still
+from .common import ADVERTISEMENT, FIRMWARE_FRAME, INFO_FRAME, gif, noise_gif, still
 
 # An image window: length, type, option, size, CRC, kind, slot, then data
 HEADER = 15
@@ -240,16 +240,119 @@ def test_broken_images(data: bytes) -> None:
 @pytest.mark.parametrize(
     ("frame", "expected"),
     [
-        (INFO_FRAME, protocol.PanelInfo(device_type=0x81, width=32, height=32)),
+        (
+            INFO_FRAME,
+            protocol.PanelInfo(
+                device_type=0x81, width=32, height=32, password_protected=False
+            ),
+        ),
         (
             bytes.fromhex("0c 00 01 80 83 00 00 00 00 00 00 ff"),
-            protocol.PanelInfo(device_type=0x83, width=64, height=16),
+            protocol.PanelInfo(
+                device_type=0x83, width=64, height=16, password_protected=False
+            ),
         ),
     ],
 )
 def test_parse_panel_info(frame: bytes, expected: protocol.PanelInfo) -> None:
     """The type byte gives the resolution."""
     assert protocol.parse_panel_info(frame) == expected
+
+
+@pytest.mark.parametrize(
+    ("frame", "locked"),
+    [
+        (INFO_FRAME, False),  # our unlocked panel (check V15)
+        (INFO_FRAME[:10] + b"\x01" + INFO_FRAME[11:], True),
+        (INFO_FRAME[:10], None),  # too short to say
+    ],
+    ids=["unlocked", "locked", "short"],
+)
+def test_password_flag(frame: bytes, locked: bool | None) -> None:
+    """Byte 10 of the info reply is 1 when the panel is locked (02-fixes plan §3.7)."""
+    assert protocol.parse_panel_info(frame).password_protected is locked
+
+
+def test_firmware_versions_expects_a_response() -> None:
+    """The firmware read is 04 00 05 80, answered with a frame, not an ACK."""
+    plan = protocol.firmware_versions()
+
+    assert plan.windows == (
+        protocol.Window(data=bytes.fromhex("04 00 05 80"), ack=False),
+    )
+    assert plan.response
+    assert not plan.final_ack
+
+
+@pytest.mark.parametrize(
+    ("frame", "expected"),
+    [
+        (FIRMWARE_FRAME, protocol.FirmwareVersions(mcu="11.03", wifi="7.02")),
+        (
+            bytes.fromhex("08 00 05 80 04 06 00 00"),
+            protocol.FirmwareVersions(mcu="4.06", wifi="0.00"),
+        ),
+    ],
+)
+def test_parse_firmware_versions(
+    frame: bytes, expected: protocol.FirmwareVersions
+) -> None:
+    """The minor version has two digits, as in the vendor app (check V14)."""
+    assert protocol.parse_firmware_versions(frame) == expected
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        bytes.fromhex("08 00 05 80 0b 03"),  # too short
+        INFO_FRAME,
+        bytes.fromhex("05 00 05 80 01"),  # an ACK
+    ],
+)
+def test_parse_firmware_versions_rejects_other_frames(frame: bytes) -> None:
+    """Any other frame is an error."""
+    with pytest.raises(ValueError, match="firmware"):
+        protocol.parse_firmware_versions(frame)
+
+
+@pytest.mark.parametrize(
+    ("payload", "cid", "pid", "device_type"),
+    [
+        # A B.K. Light 32×32 (check V16)
+        (ADVERTISEMENT, "0007", "02", 0x81),
+        # The cid bytes in decimal, joined, then padded: 10 and 5 make 0105
+        (bytes.fromhex("00 72 0a 05 05 00 83"), "0105", "05", 0x83),
+        # A pid from 100 up takes three digits
+        (bytes.fromhex("00 72 00 07 64 00 81"), "0007", "100", 0x81),
+    ],
+)
+def test_parse_advertisement(
+    payload: bytes, cid: str, pid: str, device_type: int
+) -> None:
+    """The manufacturer data gives the cid, the pid and the type (02-fixes plan §3.6)."""
+    identity = protocol.parse_advertisement({21076: payload})
+
+    assert identity == protocol.AdvertisedIdentity(
+        cid=cid, pid=pid, device_type=device_type
+    )
+    assert identity.product_id == cid + pid
+
+
+@pytest.mark.parametrize(
+    "manufacturer_data",
+    [
+        {},  # the name only, like a 64×16 B.K. Light
+        {76: ADVERTISEMENT},  # another company
+        {21076: ADVERTISEMENT[:6]},  # too short
+        {21076: b"\x01" + ADVERTISEMENT[1:]},  # not the vendor's layout
+    ],
+    ids=["none", "another company", "short", "another layout"],
+)
+def test_advertisement_without_an_identity(
+    manufacturer_data: dict[int, bytes],
+) -> None:
+    """Anything else has no product id."""
+    assert protocol.parse_advertisement(manufacturer_data) is None
 
 
 @pytest.mark.parametrize(

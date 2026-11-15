@@ -30,9 +30,24 @@
         'address': 'AA:BB:CC:DD:EE:FF',
         'device_type': 129,
         'height': 32,
+        'product_id': '000702',
         'width': 32,
       }),
       'title': 'Kitchen Pixel',
+    }),
+    'panel': dict({
+      'advertised': dict({
+        'cid': '0007',
+        'device_type': 129,
+        'pid': '02',
+        'product_id': '000702',
+      }),
+      'firmware': dict({
+        'frame': '08 00 05 80 0b 03 07 02',
+        'mcu': '11.03',
+        'wifi': '7.02',
+      }),
+      'password_protected': False,
     }),
     'state': dict({
       'auto_reconnect': True,

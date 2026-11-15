@@ -3,7 +3,7 @@
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity import Entity, EntityDescription
 
-from .const import DOMAIN, MANUFACTURER
+from .const import CONF_PRODUCT_ID, DOMAIN, MANUFACTURER
 from .controller import IPixelController
 
 
@@ -12,6 +12,9 @@ class IPixelEntity(Entity):
 
     HA prefixes the entity name with the device name, which is the name given
     in the config flow, so entity_ids look like sensor.<display>_<key>.
+    The controller keeps the device's firmware version and model id up to
+    date: the firmware version isn't set here, so the registry keeps the
+    last one read.
     """
 
     _attr_has_entity_name = True
@@ -31,6 +34,7 @@ class IPixelEntity(Entity):
             connections={(CONNECTION_BLUETOOTH, address)},
             manufacturer=MANUFACTURER,
             model=f"LED Pixel Board {panel.width}×{panel.height}",
+            model_id=controller.entry.data.get(CONF_PRODUCT_ID),
             name=controller.entry.title,
         )
 

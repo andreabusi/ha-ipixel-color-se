@@ -22,9 +22,9 @@ from homeassistant.helpers import device_registry as dr, entity_registry as er
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.ipixel_color_se.const import DOMAIN
+from custom_components.ipixel_color_se.const import CONF_PRODUCT_ID, DOMAIN
 
-from .common import ADDRESS, ENTRY_DATA, NAME, FakePanel
+from .common import ADDRESS, ENTRY_DATA, NAME, PRODUCT_ID, FakePanel
 from .test_init import setup_entry
 
 POWER = "switch.kitchen_pixel_power"
@@ -112,6 +112,27 @@ async def test_device(
     assert device.manufacturer == "iPixel"
     assert device.model == "LED Pixel Board 32×32"
     assert device.connections == {(dr.CONNECTION_BLUETOOTH, ADDRESS)}
+
+
+async def test_device_model_id(
+    hass: HomeAssistant, mock_panel: FakePanel, device_registry: dr.DeviceRegistry
+) -> None:
+    """The device has the product id the panel advertised, even out of range."""
+    mock_panel.present = False
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        title=NAME,
+        unique_id=ADDRESS,
+        data={**ENTRY_DATA, CONF_PRODUCT_ID: PRODUCT_ID},
+    )
+    await setup_entry(hass, entry)
+
+    device = device_registry.async_get_device_by_identifier(
+        (DOMAIN, ADDRESS), entry.entry_id
+    )
+
+    assert device is not None
+    assert device.model_id == PRODUCT_ID
 
 
 async def test_two_displays(
