@@ -28,7 +28,7 @@ The checks are run by the maintainer, who looks at the panel and cuts its power,
 | [V13](#v13-ack-status-0) | ACK status 0 | 02-fixes, M6 | 2026-11-15 |
 | [V14](#v14-firmware-read) | Firmware read | 02-fixes, M7 | 2026-11-15 |
 | [V15](#v15-password-flag-of-an-unlocked-panel) | Password flag of an unlocked panel | 02-fixes, M7 | 2026-11-15 |
-| [V16](#v16-advertisement-layout) | Advertisement layout | 02-fixes, M7 | — |
+| [V16](#v16-advertisement-layout) | Advertisement layout | 02-fixes, M7 | 2026-11-15 (USB adapter) |
 | [V17](#v17-ack-timings-of-a-transfer) | ACK timings of a transfer | 02-fixes, M6 | 2026-11-15 |
 | [V18](#v18-write-size) | Write size | 02-fixes, M8 | 2026-11-15 (USB adapter) |
 
@@ -141,7 +141,9 @@ The sections of V1–V12 cite the 01-base documents as "spec §n" and "plan §n"
 
 - **Question**: does the panel's manufacturer data, through the USB adapter and through the ESPHome proxy, have the layout the comparison describes (`00 72 <cid> <pid> <?> <type>`)? It's read from HA's Bluetooth diagnostics, with no action on the panel.
 - **Why**: C6 and C8 (02-fixes plan §3.6, §3.8).
-- **Outcome**: not run yet.
+- **Outcome**, through the USB adapter (2026-11-15): the manufacturer data of company 21076 is `00 72 00 07 02 00 81`, the layout the comparison describes: cid `0007`, pid `02`, so product id `000702`, and type `0x81`. Byte 5 is `00`. The panel advertises no service UUID.
+  - No Disconnect was needed. HA's Bluetooth keeps the last advertisement from before the connection, while the panel is connected and silent (check V4), so the integration reads the product id from it at startup too.
+- **Outcome through the ESPHome proxy**: not run yet. The proxy was offline.
 
 ### V17: ACK timings of a transfer
 

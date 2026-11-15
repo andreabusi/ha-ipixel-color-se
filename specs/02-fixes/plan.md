@@ -98,7 +98,7 @@ The log of the maintainer's HA, from 2026-11-08, while the panel was reached thr
 ### 3.5 Firmware version (C5)
 
 - `protocol.firmware_versions()` builds the request `04 00 05 80`, which expects a response. `protocol.parse_firmware_versions(frame)` reads `08 00 05 80 <MCU major> <MCU minor> <WiFi major> <WiFi minor>` and formats each version as the app does, with the minor on two digits: 4 and 6 become `4.06`. pypixelcolor has no command for it, so `protocol` builds the bytes itself.
-- **When**: once per connection, right after the restore. It's not part of the restore: if the panel doesn't answer or the frame is unexpected, the controller logs at debug and doesn't ask again until HA restarts, so a panel without this command doesn't cost 8 s on every connection.
+- **When**: once per connection, right after the restore. It's not part of the restore: if the panel doesn't answer or the frame is unexpected, the controller logs at debug and doesn't ask again until HA restarts or the entry reloads, so a panel without this command doesn't cost 8 s on every connection. A read cut by a lost connection is asked again on the next one.
 - **Where**: the MCU version becomes the device's `sw_version`, updated in the device registry only when it changes. Both versions go in the diagnostics, with the raw frame. The WiFi version goes only in the diagnostics: a panel without WiFi probably reports zeros (V14).
 - The 01-base spec dropped the "MCU Version" and "WiFi Version" sensors because they were always `unknown` (P6). There is still no sensor: the version is fixed data, and it belongs on the device page.
 
@@ -110,8 +110,8 @@ The log of the maintainer's HA, from 2026-11-08, while the panel was reached thr
   - the device type is byte 6.
 
   The product id is the cid followed by the pid, for example `000702`. Anything else returns `None`: some panels advertise no product id.
-- **Where it's read**: in the controller's advertisement callback, which already gets every advertisement, and in the config flow's discovery.
-- **Where it's kept**: in `entry.data` (`product_id`), written the first time it's seen and only when it changes. The panel is silent while connected (V4), so it must be known without an advertisement, and across restarts. Existing entries get it from the first advertisement after the update.
+- **Where it's read**: in the controller's advertisement callback, which already gets every advertisement, from any scanner, passive ones included. Also from HA's last advertisement when the controller starts, as the signal strength is, and in the config flow's discovery.
+- **Where it's kept**: in `entry.data` (`product_id`), written the first time it's seen and only when it changes. The panel is silent while connected (V4), so it must be known without an advertisement, and across restarts. HA's Bluetooth keeps the last advertisement from before the connection (V16), so existing entries get it at the first start after the update.
 - **Where it's shown**: the device's `model_id` in the device registry, and the diagnostics, with cid, pid and the advertised type. The model stays `LED Pixel Board W×H`, and there's no brand table (N17).
 
 ### 3.7 Password flag (C7)
@@ -133,7 +133,7 @@ The JSON gains:
 - `panel.firmware` (`mcu`, `wifi`, raw frame);
 - `panel.advertised` (`cid`, `pid`, `product_id`, `device_type`);
 - `panel.password_protected`;
-- `connection.write_size`.
+- `connection.write_size`, which comes with C3, in M8.
 
 The snapshot is regenerated, and the diff reviewed.
 
@@ -188,6 +188,7 @@ The outcomes of the panel checks are in [panel-checks.md](../panel-checks.md).
 | Milestone | Date | Outcome |
 |---|---|---|
 | **M6** | 2026-11-15 | **Probe session** through the USB adapter, one step at a time with the maintainer watching the panel: V13, V14, V15, and the adapter part of V17 and V18. A new connection brings up the built-in GIFs unless content follows at once (V14), so each visual step started by showing the clock. **Implementation** as in §3.1, §3.2 and §3.4: status `0` raises `IPixelRejectedError` at once, a rejected transfer is sent once more, image windows wait 20 s for their ACK, each window logs its write and ACK times at debug, and a failed background restore or late image is retried after 15 s. 264 tests, 20 of them new, with mutations of the rejection, the transfer retry, the restore retry and its cancellation each caught. **Deploy**: HACS had installed the integration's files as root, from inside the container, so `rsync` couldn't replace them. `deploy.sh` now gives them to the SSH user first. **Real test**: HA restart, with the restore and then the image after startup. Power cut: reconnected in 4 s through the USB adapter, and the GIF came back. Then a reconnection through the ESPHome proxy, back online, with a full restore. Three 58 KB GIFs in 5 windows through the proxy: 24.6–25.0 s each, ACKs 0–48 ms after the writes, no timeout (V17). A rejected command can't come from the UI, because every value the entities offer is valid (V13): C1 is covered by the tests and V13. The retry of a failed restore is covered by the tests only, because a failure can't be caused on demand on the real panel. |
+| **M7** | 2026-11-15 | **V16** through the USB adapter, from HA's Bluetooth diagnostics, with no Disconnect: HA keeps the last advertisement from before the connection. The manufacturer data is `00 72 00 07 02 00 81`, as the comparison describes. The proxy part waits for the proxy, which was offline. **Implementation** as in §3.5–§3.9: the firmware read follows the restore once per connection, and a panel that doesn't answer it isn't asked again. The product id comes from every advertisement and from HA's last one at startup, goes in `entry.data` only when it changes, and is the device's model id. Every reply to `set_time` gives the password flag, with one warning per connection when it's set. The manufacturer data matcher is in the manifest and in `is_ipixel`, and a test checks that HA's matchers, read from the manifest, agree with `is_ipixel`. The cid is written as the vendor app does, according to the other integration's code: the two bytes in decimal, joined, then padded to 4 digits. `connection.write_size` is left to M8, with C3. 297 tests, 33 of them new, with 17 mutations each caught. **Real test**: at the first start after the deploy the entry got `product_id` `000702` from HA's last advertisement. The device has model id `000702` and firmware `11.03`, and the diagnostics have MCU 11.03, WiFi 7.02 and the password flag `false`. The new matcher started no second discovery of the configured panel. |
 
 ---
 
