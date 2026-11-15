@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Status** | Approved |
+| **Status** | In progress |
 | **Date** | 2026-11-15 |
 | **Release** | `v0.2.0` (D15) |
 | **Input** | The [01-base spec](../01-base/spec.md) and [plan](../01-base/plan.md), and C1–C8 of the [2026-11-11 comparison](../analysis/2026-11-11-ble-led-pixel-comparison.md) |
@@ -57,7 +57,7 @@ The log of the maintainer's HA, from 2026-11-08, while the panel was reached thr
 - `protocol` names the statuses: `ACK_OK = 1`, `ACK_DONE = 3`, `ACK_REJECTED = 0`.
 - An ACK of the command being waited for with status `0` raises `IPixelRejectedError`, a subclass of `IPixelCommandError`, at once, without waiting for the timeout. That holds for a simple command, for a window and for the final ACK of a transfer.
 - The controller already turns `IPixelCommandError` into `command_failed`, whose message ("… didn't accept the command: …") fits. No new translation key is needed.
-- **Retry**: the vendor app sends a rejected transfer again from the start. If V13 shows that a transfer with a corrupted window gets `0`, and that sending it again works, `IPixelConnection` restarts a rejected transfer from its first window, once. Otherwise a rejected transfer fails like a simple command. A simple command is never retried, because a rejected value stays rejected.
+- **Retry**: the vendor app sends a rejected transfer again from the start. V13 showed that a transfer with a corrupted window gets `0`, at its last window because the panel checks the CRC once the whole file is in, and that sending it again works. So `IPixelConnection` restarts a rejected transfer from its first window, once. A transfer is a plan with a final ACK. A simple command is never retried, because a rejected value stays rejected.
 - Status `2`, which the app sees only for its camera stream, stays ignored as today.
 
 **Risk**: a command that works but gets `0` would start failing. V9 (simple commands), V5 (clock styles 1–9) and M4 (image windows, `05 00 03 00 01`) only ever saw `1` and `3` for valid commands, and V13 checks again every command we send.
@@ -68,7 +68,7 @@ The log of the maintainer's HA, from 2026-11-08, while the panel was reached thr
 
 **Change**:
 - **Timings in the debug log**: for each window of a transfer, the time spent writing and the time waiting for the ACK, and the same for the final ACK. They're needed by V17 and stay as a diagnostic aid.
-- **A timeout per plan**: `SendPlan` gets `ack_timeout`. It stays 8 s for simple commands, which answer in about 30 ms (V9). `protocol.image` sets a longer one for its windows and its final ACK: 20 s is proposed, and V17 fixes the value as the longest wait seen through the proxy, with margin.
+- **A timeout per plan**: `SendPlan` gets `ack_timeout`. It stays 8 s for simple commands, which answer in about 30 ms (V9). `protocol.image` sets a longer one for its windows and its final ACK, `TRANSFER_ACK_TIMEOUT` = 20 s. V17 measured 0–48 ms through both paths while they work, so the value is only for a degraded path: through the proxy with a weak WiFi link, on 2026-11-08, two waits went past 8 s and weren't measured. 20 s stays, as proposed. The wait starts when the window's writes return, so slow writes don't use it up.
 - A really lost ACK then holds the lock, with the player in buffering, for up to 20 s per window instead of 8. Simple commands keep failing fast.
 
 ### 3.3 Write size (C3)
@@ -90,7 +90,9 @@ The log of the maintainer's HA, from 2026-11-08, while the panel was reached thr
 - When a background restore, or the late image, fails and the panel is still connected, the controller schedules one retry after 15 s (`RESTORE_RETRY_DELAY`) with `async_call_later`.
 - The retry takes the lock like any operation. It does something only if the restore is still needed and the panel is still connected: a command may have restored the panel meanwhile, and after a disconnection the next connection restores it anyway.
 - If the retry fails too: a warning, and the rule of plan §4.3 applies (the restore runs before the next command).
-- The timer is cancelled on disconnection and on unload.
+- A late image that fails also marks the restore as needed, as a failed `Image fit` already does: a transfer that fails halfway may leave anything on the panel. So the retry, or else the next command, runs the whole restore, image included.
+- The timer is cancelled on disconnection. Unloading disconnects, so that cancels it too.
+- Until the restore works, the panel may show its built-in GIFs: a new connection brings them up unless content follows at once (V14).
 - A restore that fails inside a command is not retried: the command fails, and the user sees the error.
 
 ### 3.5 Firmware version (C5)
@@ -181,7 +183,11 @@ M6 comes first because C1 and C2 change the ACK handling that the rest relies on
 
 ### Milestone outcomes
 
-None yet.
+The outcomes of the panel checks are in [panel-checks.md](../panel-checks.md).
+
+| Milestone | Date | Outcome |
+|---|---|---|
+| **M6** | 2026-11-15 | **Probe session** through the USB adapter, one step at a time with the maintainer watching the panel: V13, V14, V15, and the adapter part of V17 and V18. A new connection brings up the built-in GIFs unless content follows at once (V14), so each visual step started by showing the clock. **Implementation** as in §3.1, §3.2 and §3.4: status `0` raises `IPixelRejectedError` at once, a rejected transfer is sent once more, image windows wait 20 s for their ACK, each window logs its write and ACK times at debug, and a failed background restore or late image is retried after 15 s. 264 tests, 20 of them new, with mutations of the rejection, the transfer retry, the restore retry and its cancellation each caught. **Deploy**: HACS had installed the integration's files as root, from inside the container, so `rsync` couldn't replace them. `deploy.sh` now gives them to the SSH user first. **Real test**: HA restart, with the restore and then the image after startup. Power cut: reconnected in 4 s through the USB adapter, and the GIF came back. Then a reconnection through the ESPHome proxy, back online, with a full restore. Three 58 KB GIFs in 5 windows through the proxy: 24.6–25.0 s each, ACKs 0–48 ms after the writes, no timeout (V17). A rejected command can't come from the UI, because every value the entities offer is valid (V13): C1 is covered by the tests and V13. The retry of a failed restore is covered by the tests only, because a failure can't be caused on demand on the real panel. |
 
 ---
 

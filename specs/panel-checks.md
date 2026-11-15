@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **Updated** | 2026-11-13 |
+| **Updated** | 2026-11-15 |
 | **Next ID** | V19 |
 
 Questions that only the real panel can answer, and what it answered. Each check belongs to a unit, whose spec and plan cite it by ID. IDs are global and never reused (see the [rules](README.md#rules)).
@@ -25,12 +25,12 @@ The checks are run by the maintainer, who looks at the panel and cuts its power,
 | [V10](#v10-gifs-frozen-on-their-first-frame) | GIFs frozen on their first frame | 01-base, M4 | 2026-11-08 |
 | [V11](#v11-image-after-turning-the-screen-off-and-on) | Image after turning the screen off and on | 01-base, M4 | 2026-11-08 |
 | [V12](#v12-time-sync-with-an-image-on-screen) | Time sync with an image on screen | 01-base, M4 | 2026-11-08 |
-| [V13](#v13-ack-status-0) | ACK status 0 | 02-fixes, M6 | — |
-| [V14](#v14-firmware-read) | Firmware read | 02-fixes, M7 | — |
-| [V15](#v15-password-flag-of-an-unlocked-panel) | Password flag of an unlocked panel | 02-fixes, M7 | — |
+| [V13](#v13-ack-status-0) | ACK status 0 | 02-fixes, M6 | 2026-11-15 |
+| [V14](#v14-firmware-read) | Firmware read | 02-fixes, M7 | 2026-11-15 |
+| [V15](#v15-password-flag-of-an-unlocked-panel) | Password flag of an unlocked panel | 02-fixes, M7 | 2026-11-15 |
 | [V16](#v16-advertisement-layout) | Advertisement layout | 02-fixes, M7 | — |
-| [V17](#v17-ack-timings-of-a-transfer) | ACK timings of a transfer | 02-fixes, M6 | — |
-| [V18](#v18-write-size) | Write size | 02-fixes, M8 | — |
+| [V17](#v17-ack-timings-of-a-transfer) | ACK timings of a transfer | 02-fixes, M6 | 2026-11-15 |
+| [V18](#v18-write-size) | Write size | 02-fixes, M8 | 2026-11-15 (USB adapter) |
 
 The sections of V1–V12 cite the 01-base documents as "spec §n" and "plan §n". Those of V13 and later cite the [02-fixes plan](02-fixes/plan.md).
 
@@ -117,19 +117,25 @@ The sections of V1–V12 cite the 01-base documents as "spec §n" and "plan §n"
 
 - **Question**: which commands get status `0`, and what does the panel show then? Try clock style 10, orientation 4, brightness 101 and 255, and a PNG transfer with a wrong CRC, followed by the same transfer with the right one. Does any command that works get `0`? Does a rejected transfer work when it's sent again?
 - **Why**: C1 (02-fixes plan §3.1): whether status `0` can be treated as an error, and whether a rejected transfer is worth one more attempt.
-- **Outcome**: not run yet.
+- **Outcome** (2026-11-15, through the USB adapter, with the clock on screen before each command):
+  - **Status `0`** for brightness 101 and 255, orientation 4, clock style 10 (as in V5), a PNG with a wrong CRC, and a 3-window GIF with one byte flipped in its second window and the right CRC in the header. Each time the panel kept the clock and didn't restart.
+  - In the corrupted GIF, windows 0 and 1 got `1` and only the last one got `0`. The panel checks the CRC once the whole file is in, so a rejected transfer shows only in the last ACK.
+  - **Every valid command** the integration sends got `1`: orientation 0–3, power off and on, brightness 1, 20, 50 and 100, clock styles 1–8 in 24-hour format, style 1 in 12-hour format with the date, and the windows of PNGs and GIFs. `set_time` got its info frame. No valid command got `0`.
+  - **Sent again** intact right after its rejection, on the same connection, the GIF got `1`, `1`, `3`, and the panel showed it, animated. So one more attempt at a rejected transfer works.
 
 ### V14: Firmware read
 
 - **Question**: does the panel answer `04 00 05 80` with `08 00 05 80 <MCU major> <MCU minor> <WiFi major> <WiFi minor>`, how fast, and with what values? Does the read change what the screen shows?
 - **Why**: C5 (02-fixes plan §3.5).
-- **Outcome**: not run yet.
+- **Outcome** (2026-11-15, through the USB adapter): the panel answers in 30–60 ms with `08 00 05 80 0b 03 07 02`, that is MCU 11.03 and WiFi 7.02, also after a power cut. The WiFi version isn't zero. The read doesn't change the screen: the clock stayed for 10 s before it and 15 s after it, on the same connection.
+  - What does change the screen is **a new connection**. Each time a client connects and enables notifications, the panel shows a chain-link icon and then its built-in GIFs, unless content arrives right away: a clock sent 0.1 s after connecting stayed on screen. Disconnecting changes nothing. The integration's restore always sends content or turns the screen off, but a restore that fails leaves the built-in GIFs on screen.
 
 ### V15: Password flag of an unlocked panel
 
 - **Question**: is byte 10 of the info frame `0` on a panel without a password, after a power cut too? The locked case isn't checked: it would mean locking the panel.
 - **Why**: C7 (02-fixes plan §3.7): a byte that isn't `0` on an unlocked panel would make the flag useless.
-- **Outcome**: not run yet.
+- **Outcome** (2026-11-15, through the USB adapter): the info frame has 12 bytes, for example `0c 00 01 80 81 1d 37 00 00 01 00 01`, and **byte 10 is `0`** in every reply, before and after a power cut. Bytes 9 and 11 were always `01`.
+  - Byte 8, which V3 read as the month, was `0` after the power cut and `0b` (11) after a clock command, and it went back to `0` after any image transfer, even a rejected one.
 
 ### V16: Advertisement layout
 
@@ -141,10 +147,17 @@ The sections of V1–V12 cite the 01-base documents as "spec §n" and "plan §n"
 
 - **Question**: in an image transfer, how long after its last write does each window's ACK arrive, and the final one? With a small PNG and a 59 KB GIF, through the USB adapter and through the ESPHome proxy.
 - **Why**: C2 (02-fixes plan §3.2): the ACK timeout of transfers.
-- **Outcome**: not run yet.
+- **Outcome**, through the USB adapter (2026-11-15), with 244-byte writes:
+  - Every window's ACK, and the final one, came **15–47 ms** after the window's last write returned, for a 286-byte PNG and for a 58 KB GIF in 5 windows. The 4.7–5.4 s of a 12 KB window are all writing.
+  - When the panel gets the same file again, every window gets status `3`, not only the last one. That happened with the 58 KB GIF sent twice in a row.
+- **Outcome through the ESPHome proxy** (2026-11-15, through the integration, from its debug log, with the proxy's WiFi working well): three different 58 KB GIFs in 5 windows took 24.6–25.0 s each, and every ACK came **0–48 ms** after the window's last write returned. A 9.4 KB GIF in one window took 4.0 s. So the time goes into the writes on both paths, and the ACK wait is short whenever the path works.
+  - On 2026-11-08, with the proxy's WiFi weak, two image transfers had no ACK within 8 s (02-fixes plan §2). How late those ACKs were, if they came at all, wasn't logged.
 
 ### V18: Write size
 
 - **Question**: what write size does each path allow (the MTU through the proxy, the characteristic's limit on BlueZ)? How long does a 12 KB window take with 244-byte writes, with the allowed size, and with 509 bytes? Does every transfer still succeed?
 - **Why**: C3 (02-fixes plan §3.3).
-- **Outcome**: not run yet.
+- **Outcome**, through the USB adapter (2026-11-15):
+  - bleak reports `mtu_size` 23 and a `max_write_without_response_size` of 20 for the write characteristic, so on BlueZ neither gives the real limit.
+  - Writes of 509 bytes, with response, work anyway. The 58 KB GIF took 20.0 s, against 23.5 and 24.9 s with 244-byte writes, and a 12 KB window took 4.1–4.6 s instead of 4.7–5.4 s. Every transfer succeeded.
+- **Outcome through the ESPHome proxy**: not run yet.
