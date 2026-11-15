@@ -27,9 +27,19 @@ from pypixelcolor.lib.transport.send_plan import SendPlan as _PixelSendPlan
 
 from .state import ImageFit
 
-# ACK status bytes: 0 and 1 acknowledge a window, 3 the end of a transfer
-ACK_WINDOW_STATUSES = frozenset({0, 1})
-ACK_DONE_STATUS = 3
+# ACK status bytes, 05 00 xx xx <status> (check V13): the panel rejected the
+# command or the transfer, took the command or the window, or got the whole
+# transfer. The vendor app sees 2 only for its camera stream.
+ACK_REJECTED = 0
+ACK_OK = 1
+ACK_DONE = 3
+
+# How long to wait for each ACK. Simple commands answer in about 30 ms
+# (check V9). An image window's ACK came 15-47 ms after its writes through
+# the USB adapter (check V17); through a proxy with a weak WiFi link it took
+# seconds. Provisional until V17 measures the proxy (02-fixes plan §3.2).
+ACK_TIMEOUT = 8.0
+TRANSFER_ACK_TIMEOUT = 20.0
 
 _PANEL_INFO_COMMAND = b"\x01\x80"
 
@@ -72,9 +82,14 @@ class SendPlan:
     chunk_size: int = 244
     """Bytes per BLE write."""
     final_ack: bool = False
-    """Wait for the end-of-transfer ACK after the last window."""
+    """Wait for the end-of-transfer ACK after the last window.
+
+    A plan with a final ACK is a transfer, like an image.
+    """
     response: bool = False
     """The panel answers with a frame that isn't an ACK."""
+    ack_timeout: float = ACK_TIMEOUT
+    """Seconds to wait for each ACK."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,8 +155,9 @@ def image(data: bytes, fit: ImageFit, width: int, height: int) -> SendPlan:
     between: pypixelcolor resizes and converts the image, turning
     transparent areas black. Fill crops what doesn't fit, Fit adds black
     bars. The transfer goes in windows of 12 KB: the panel acknowledges
-    each, and the end. CPU-bound: run it in the executor. Raise ImageError
-    if the data can't be decoded.
+    each, and the end, with more time allowed than for simple commands.
+    CPU-bound: run it in the executor. Raise ImageError if the data can't be
+    decoded.
     """
     try:
         data, is_gif = _prepare_image(data)
@@ -150,7 +166,10 @@ def image(data: bytes, fit: ImageFit, width: int, height: int) -> SendPlan:
         raise ImageError(f"Can't convert the image: {err}") from err
     if is_gif:
         data = _pad_global_color_table(data)
-    return _convert(_build_send_plan(data, is_gif, plan_name="image"))
+    return _convert(
+        _build_send_plan(data, is_gif, plan_name="image"),
+        ack_timeout=TRANSFER_ACK_TIMEOUT,
+    )
 
 
 def _prepare_image(data: bytes) -> tuple[bytes, bool]:
@@ -222,11 +241,17 @@ def ack_status(frame: bytes, command: bytes | None = None) -> int | None:
     return frame[4]
 
 
-def _convert(plan: _PixelSendPlan, *, response: bool = False) -> SendPlan:
-    """Turn a pypixelcolor plan into ours.
+def _convert(
+    plan: _PixelSendPlan,
+    *,
+    response: bool = False,
+    ack_timeout: float | None = None,
+) -> SendPlan:
+    """Turn a pypixelcolor plan into ours, waiting ack_timeout for each ACK.
 
     A command answered with a response frame gets no ACK, whatever
-    pypixelcolor's policy says.
+    pypixelcolor's policy says. The timeout defaults to ACK_TIMEOUT, read
+    when the plan is built.
     """
     ack_per_window = plan.ack_policy.ack_per_window and not response
     return SendPlan(
@@ -238,4 +263,5 @@ def _convert(plan: _PixelSendPlan, *, response: bool = False) -> SendPlan:
         chunk_size=plan.chunk_size,
         final_ack=plan.ack_policy.ack_final and not response,
         response=response,
+        ack_timeout=ACK_TIMEOUT if ack_timeout is None else ack_timeout,
     )

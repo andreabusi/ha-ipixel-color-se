@@ -17,13 +17,12 @@ from homeassistant.components.bluetooth import async_ble_device_from_address
 from homeassistant.core import HomeAssistant, callback
 
 from .const import NOTIFY_UUID, WRITE_UUID
-from .protocol import ACK_DONE_STATUS, ACK_WINDOW_STATUSES, SendPlan, ack_status
+from .protocol import ACK_DONE, ACK_OK, ACK_REJECTED, SendPlan, ack_status
 
 _LOGGER = logging.getLogger(__name__)
 
-# How long to wait for each ACK and for a response, as pypixelcolor does.
-# The panel answers simple commands in about 30 ms.
-ACK_TIMEOUT = 8.0
+# How long to wait for a response, as pypixelcolor does. Each plan says how
+# long to wait for its ACKs.
 RESPONSE_TIMEOUT = 8.0
 
 
@@ -37,6 +36,10 @@ class IPixelConnectionError(IPixelError):
 
 class IPixelCommandError(IPixelError):
     """A write failed, or the panel didn't answer it."""
+
+
+class IPixelRejectedError(IPixelCommandError):
+    """The panel rejected a command or a transfer: ACK status 0 (check V13)."""
 
 
 class IPixelConnection:
@@ -165,7 +168,13 @@ class IPixelConnection:
         return response
 
     async def _async_run(self, plan: SendPlan) -> bytes | None:
-        """Write a plan's windows, wait for its ACKs and maybe a response."""
+        """Write a plan's windows, wait for its ACKs and maybe a response.
+
+        A transfer the panel rejects is sent once more, from its first
+        window: the panel checks the file only at the end, and takes it when
+        it's sent again (check V13). A simple command isn't, because a value
+        the panel rejects stays rejected.
+        """
         async with self._send_lock:
             client = self._client
             if client is None or not client.is_connected:
@@ -174,35 +183,73 @@ class IPixelConnection:
             # write itself is confirmed
             self._frames = frames = asyncio.Queue()
             try:
-                _LOGGER.debug("Sending %s to %s", plan.name, self._address)
-                started = monotonic()
-                status: int | None = None
-                for window in plan.windows:
-                    self._discard_stale(frames)
-                    await self._async_write(client, window.data, plan.chunk_size)
-                    if window.ack:
-                        status = await self._async_wait_ack(
-                            frames, plan.name, window.data
-                        )
-                if plan.final_ack and status != ACK_DONE_STATUS:
-                    await self._async_wait_ack(
-                        frames, plan.name, plan.windows[-1].data, done=True
-                    )
-                response = None
-                if plan.response:
-                    response = await self._async_wait_response(frames, plan.name)
-                if len(plan.windows) > 1 or plan.final_ack:
-                    _LOGGER.debug(
-                        "Sent %s to %s: %d bytes in %d windows, %.1f s",
-                        plan.name,
-                        self._address,
-                        sum(len(window.data) for window in plan.windows),
-                        len(plan.windows),
-                        monotonic() - started,
-                    )
-                return response
+                try:
+                    return await self._async_attempt(client, frames, plan)
+                except IPixelRejectedError as err:
+                    if not plan.final_ack:
+                        raise
+                    _LOGGER.debug("%s, sending it again", err)
+                return await self._async_attempt(client, frames, plan)
             finally:
                 self._frames = None
+
+    async def _async_attempt(
+        self,
+        client: BleakClientWithServiceCache,
+        frames: asyncio.Queue[bytes | None],
+        plan: SendPlan,
+    ) -> bytes | None:
+        """Send a plan once. Log how long each window of a transfer took.
+
+        For each window, the time spent writing and then waiting for its ACK,
+        which can arrive before the writes return (check V9).
+        """
+        _LOGGER.debug("Sending %s to %s", plan.name, self._address)
+        started = monotonic()
+        status: int | None = None
+        for number, window in enumerate(plan.windows, 1):
+            self._discard_stale(frames)
+            window_started = monotonic()
+            await self._async_write(client, window.data, plan.chunk_size)
+            written = monotonic()
+            if not window.ack:
+                continue
+            status = await self._async_wait_ack(frames, plan, window.data)
+            if plan.final_ack:
+                _LOGGER.debug(
+                    "Window %d/%d of %s to %s: %d bytes written in %.2f s, "
+                    "ACK %d %.3f s later",
+                    number,
+                    len(plan.windows),
+                    plan.name,
+                    self._address,
+                    len(window.data),
+                    written - window_started,
+                    status,
+                    monotonic() - written,
+                )
+        if plan.final_ack and status != ACK_DONE:
+            waiting = monotonic()
+            await self._async_wait_ack(frames, plan, plan.windows[-1].data, done=True)
+            _LOGGER.debug(
+                "End of %s acknowledged by %s %.3f s after the last window's ACK",
+                plan.name,
+                self._address,
+                monotonic() - waiting,
+            )
+        response = None
+        if plan.response:
+            response = await self._async_wait_response(frames, plan.name)
+        if plan.final_ack:
+            _LOGGER.debug(
+                "Sent %s to %s: %d bytes in %d windows, %.1f s",
+                plan.name,
+                self._address,
+                sum(len(window.data) for window in plan.windows),
+                len(plan.windows),
+                monotonic() - started,
+            )
+        return response
 
     async def _async_write(
         self, client: BleakClientWithServiceCache, data: bytes, chunk_size: int
@@ -221,7 +268,7 @@ class IPixelConnection:
     async def _async_wait_ack(
         self,
         frames: asyncio.Queue[bytes | None],
-        name: str,
+        plan: SendPlan,
         window: bytes,
         *,
         done: bool = False,
@@ -229,19 +276,26 @@ class IPixelConnection:
         """Wait for a window ACK, or for the end-of-transfer ACK if done.
 
         Only an ACK that echoes the window's command counts: a late ACK of
-        another command can't let the next window go too early.
+        another command can't let the next window go too early. Raise
+        IPixelRejectedError at once if the panel rejects it.
         """
-        wanted = {ACK_DONE_STATUS} if done else {*ACK_WINDOW_STATUSES, ACK_DONE_STATUS}
+        wanted = {ACK_DONE} if done else {ACK_OK, ACK_DONE}
         try:
-            async with asyncio.timeout(ACK_TIMEOUT):
+            async with asyncio.timeout(plan.ack_timeout):
                 while True:
                     frame = await self._async_next_frame(frames)
-                    if (status := ack_status(frame, window)) in wanted:
+                    status = ack_status(frame, window)
+                    if status == ACK_REJECTED:
+                        raise IPixelRejectedError(
+                            f"{self._address} rejected {plan.name}"
+                        )
+                    if status in wanted:
                         return status
                     _LOGGER.debug("Ignored %s while waiting for an ACK", frame.hex(" "))
         except TimeoutError as err:
             raise IPixelCommandError(
-                f"{self._address} didn't acknowledge {name} within {ACK_TIMEOUT} s"
+                f"{self._address} didn't acknowledge {plan.name} "
+                f"within {plan.ack_timeout} s"
             ) from err
 
     async def _async_wait_response(

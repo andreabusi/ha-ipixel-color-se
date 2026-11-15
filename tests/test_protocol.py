@@ -134,6 +134,17 @@ def test_gif_global_color_table_has_every_color() -> None:
     assert len(image.convert("RGB").getcolors(maxcolors=32 * 32)) > 128
 
 
+def test_transfers_wait_longer_for_their_acks() -> None:
+    """Image windows get more time than simple commands (02-fixes plan §3.2)."""
+    assert protocol.brightness(40).ack_timeout == protocol.ACK_TIMEOUT
+    assert protocol.set_time(datetime(2026, 11, 7)).ack_timeout == protocol.ACK_TIMEOUT
+    assert (
+        protocol.image(gif(), ImageFit.FILL, 32, 32).ack_timeout
+        == protocol.TRANSFER_ACK_TIMEOUT
+        > protocol.ACK_TIMEOUT
+    )
+
+
 def test_large_transfers_go_in_windows() -> None:
     """Windows carry 12 KB each: the first has option 0, the others 2."""
     plan = protocol.image(noise_gif(20), ImageFit.FILL, 32, 32)
@@ -258,15 +269,17 @@ def test_parse_panel_info_rejects_other_frames(frame: bytes) -> None:
 @pytest.mark.parametrize(
     ("frame", "status"),
     [
-        (bytes.fromhex("05 00 04 80 01"), 1),
-        (bytes.fromhex("05 00 02 00 03"), 3),
+        (bytes.fromhex("05 00 04 80 01"), protocol.ACK_OK),
+        (bytes.fromhex("05 00 02 00 03"), protocol.ACK_DONE),
+        (bytes.fromhex("05 00 04 80 00"), protocol.ACK_REJECTED),
         (INFO_FRAME, None),
         (bytes.fromhex("05 00"), None),
     ],
 )
 def test_ack_status(frame: bytes, status: int | None) -> None:
-    """ACK frames are 05 00 xx xx <status>."""
+    """ACK frames are 05 00 xx xx <status>: 1 taken, 3 done, 0 rejected (V13)."""
     assert protocol.ack_status(frame) == status
+    assert (protocol.ACK_REJECTED, protocol.ACK_OK, protocol.ACK_DONE) == (0, 1, 3)
 
 
 def test_ack_status_of_a_command() -> None:

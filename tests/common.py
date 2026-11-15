@@ -157,8 +157,8 @@ class FakePanel:
 
     set_time gets the info frame, every other command an ACK. An image
     window gets an ACK with status 1, or 3 for the last one, and the panel
-    then shows the image. Tests change responder, info_frame or the error
-    attributes to simulate failures.
+    then shows the image. Tests change responder, info_frame, rejecting or
+    the error attributes to simulate failures.
 
     chunks are the BLE writes, writes the commands and windows they make up.
 
@@ -176,6 +176,13 @@ class FakePanel:
         self.connect_error: Exception | None = None
         self.notify_error: Exception | None = None
         self.write_error: Exception | None = None
+        self.rejecting: dict[str, int] = {}
+        """How many more times to reject commands of a name with status 0.
+
+        Names are the first word of describe(), like "brightness" or "gif".
+        A transfer is rejected at its last window, as the panel does with
+        one whose CRC doesn't match (check V13).
+        """
         self.chunks: list[bytes] = []
         self.writes: list[bytes] = []
         self.image: bytes | None = None
@@ -223,34 +230,48 @@ class FakePanel:
         """Answer a command the way the panel does.
 
         Brightness, orientation and set_time turn the screen back on (checks
-        V1 and V7), like any content, the clock and images included.
+        V1 and V7), like any content, the clock and images included. A
+        command it rejects changes nothing.
         """
-        match describe(data).split()[0].removesuffix(","):
+        match name := describe(data).split()[0].removesuffix(","):
             case "set_time":
                 self.screen_on = True
                 return [self.info_frame]
+            case "gif" | "png":
+                return [ack(data, self.receive_window(data))]
+        if self._rejects(name):
+            return [ack(data, 0)]
+        match name:
             case "power":
                 self.screen_on = bool(data[4])
             case "brightness" | "orientation" | "clock":
                 self.screen_on = True
-            case "gif" | "png":
-                return [ack(data, self.receive_window(data))]
         return [ack(data)]
 
     def receive_window(self, window: bytes) -> int:
         """Collect a window of an image transfer, and return its ACK status.
 
         The header carries the size of the whole image: the window that
-        completes it gets status 3, and the panel shows the image.
+        completes it gets status 3, and the panel shows the image, unless it
+        rejects the transfer with status 0.
         """
         if window[4] != _CONTINUED:
             self._transfer = bytearray()
         self._transfer += window[_WINDOW_HEADER:]
         if len(self._transfer) < int.from_bytes(window[5:9], "little"):
             return 1
+        if self._rejects(describe(window).removesuffix(", continued")):
+            return 0
         self.image = bytes(self._transfer)
         self.screen_on = True
         return 3
+
+    def _rejects(self, name: str) -> bool:
+        """Return whether to reject a command named name, counting it."""
+        if not self.rejecting.get(name):
+            return False
+        self.rejecting[name] -= 1
+        return True
 
     def advertise(
         self,

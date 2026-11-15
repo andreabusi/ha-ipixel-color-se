@@ -1,6 +1,7 @@
 """Tests for the Bluetooth transport."""
 
 import asyncio
+import logging
 from unittest.mock import Mock
 
 from bleak.backends.device import BLEDevice
@@ -9,11 +10,11 @@ from habluetooth.wrappers import HaBleakClientWrapper
 from homeassistant.core import HomeAssistant
 import pytest
 
-from custom_components.ipixel_color_se import connection as connection_module
 from custom_components.ipixel_color_se.connection import (
     IPixelCommandError,
     IPixelConnection,
     IPixelConnectionError,
+    IPixelRejectedError,
 )
 from custom_components.ipixel_color_se.protocol import SendPlan, Window
 
@@ -22,6 +23,10 @@ from .common import ADDRESS, INFO_FRAME, FakePanel, ack
 BRIGHTNESS = bytes.fromhex("05 00 04 80 46")
 POWER_ON = bytes.fromhex("05 00 07 01 01")
 SET_TIME = bytes.fromhex("08 00 01 80 13 11 02 00")
+# The first and the next window of a transfer, each acknowledged by its own
+# bytes 2 and 3
+FIRST = bytes.fromhex("06 00 03 00 00 aa")
+NEXT = bytes.fromhex("06 00 03 00 02 bb")
 
 
 def plan(*windows: bytes, **kwargs: object) -> SendPlan:
@@ -101,16 +106,15 @@ async def test_send_waits_for_the_ack(
 
 
 async def test_send_without_ack_fails(
-    connection: IPixelConnection,
-    mock_panel: FakePanel,
-    monkeypatch: pytest.MonkeyPatch,
+    connection: IPixelConnection, mock_panel: FakePanel
 ) -> None:
-    """A missing ACK is an error, not a silent success."""
-    monkeypatch.setattr(connection_module, "ACK_TIMEOUT", 0.01)
+    """A missing ACK is an error, not a silent success, after the plan's timeout."""
     mock_panel.responder = lambda _data: []
 
-    with pytest.raises(IPixelCommandError, match="didn't acknowledge"):
-        await connection.async_send(plan(BRIGHTNESS))
+    with pytest.raises(
+        IPixelCommandError, match=r"didn't acknowledge test within 0\.01 s"
+    ):
+        await connection.async_send(plan(BRIGHTNESS, ack_timeout=0.01))
 
 
 async def test_send_write_error(
@@ -141,7 +145,7 @@ async def test_windows_are_written_in_chunks(
 
 async def test_final_ack(connection: IPixelConnection, mock_panel: FakePanel) -> None:
     """With final_ack, the transfer ends only at status 3."""
-    statuses = iter([[1], [0, 3]])
+    statuses = iter([[1], [1, 3]])
     mock_panel.responder = lambda data: [ack(data, s) for s in next(statuses)]
 
     await connection.async_send(plan(POWER_ON, POWER_ON, final_ack=True))
@@ -167,22 +171,116 @@ async def test_final_ack_after_the_last_window(
 
 
 async def test_ack_of_another_command_is_ignored(
-    connection: IPixelConnection,
-    mock_panel: FakePanel,
-    monkeypatch: pytest.MonkeyPatch,
+    connection: IPixelConnection, mock_panel: FakePanel
 ) -> None:
     """Only an ACK that echoes the command's bytes 2 and 3 counts (check V9).
 
-    A late ACK of another command can't let the next window go too early.
+    A late ACK of another command can't let the next window go too early,
+    and another command's rejection isn't this one's.
     """
-    monkeypatch.setattr(connection_module, "ACK_TIMEOUT", 0.05)
-    mock_panel.responder = lambda _data: [ack(POWER_ON)]
+    mock_panel.responder = lambda _data: [ack(POWER_ON), ack(POWER_ON, 0)]
 
     with pytest.raises(IPixelCommandError, match="didn't acknowledge"):
-        await connection.async_send(plan(BRIGHTNESS))
+        await connection.async_send(plan(BRIGHTNESS, ack_timeout=0.05))
 
     mock_panel.responder = lambda data: [ack(POWER_ON), ack(data)]
     await connection.async_send(plan(BRIGHTNESS))
+
+
+async def test_rejected_command_fails_at_once(
+    connection: IPixelConnection, mock_panel: FakePanel
+) -> None:
+    """Status 0 is a rejection (check V13): no wait for the timeout, no retry.
+
+    A value the panel rejects stays rejected.
+    """
+    mock_panel.responder = lambda data: [ack(data, 0)]
+
+    async with asyncio.timeout(1):
+        with pytest.raises(
+            IPixelRejectedError, match="AA:BB:CC:DD:EE:FF rejected test"
+        ):
+            await connection.async_send(plan(BRIGHTNESS, ack_timeout=30))
+    assert mock_panel.writes == [BRIGHTNESS]
+
+
+async def test_status_2_is_ignored(
+    connection: IPixelConnection, mock_panel: FakePanel
+) -> None:
+    """The vendor app sees status 2 only for its camera stream: it's no answer."""
+    mock_panel.responder = lambda data: [ack(data, 2), ack(data)]
+
+    await connection.async_send(plan(BRIGHTNESS))
+
+
+@pytest.mark.parametrize(
+    "rejected",
+    [
+        # The last window, like a file whose CRC doesn't match (check V13)
+        [[1], [0]],
+        # The end of the transfer, after the last window's own ACK
+        [[1], [1, 0]],
+        # The first window: the rest isn't sent
+        [[0]],
+    ],
+)
+async def test_rejected_transfer_is_sent_again(
+    connection: IPixelConnection, mock_panel: FakePanel, rejected: list[list[int]]
+) -> None:
+    """A rejected transfer is sent once more, from its first window (check V13)."""
+    statuses = iter([*rejected, [1], [3]])
+    mock_panel.responder = lambda data: [ack(data, s) for s in next(statuses)]
+
+    await connection.async_send(plan(FIRST, NEXT, final_ack=True))
+
+    assert mock_panel.writes == [*[FIRST, NEXT][: len(rejected)], FIRST, NEXT]
+
+
+async def test_transfer_rejected_twice_fails(
+    connection: IPixelConnection, mock_panel: FakePanel
+) -> None:
+    """Only one more attempt: then the rejection is the command's error."""
+    mock_panel.responder = lambda data: [ack(data, 0 if data == NEXT else 1)]
+
+    with pytest.raises(IPixelRejectedError, match="rejected test"):
+        await connection.async_send(plan(FIRST, NEXT, final_ack=True))
+
+    assert mock_panel.writes == [FIRST, NEXT, FIRST, NEXT]
+
+
+async def test_every_window_goes_when_each_ends_the_transfer(
+    connection: IPixelConnection, mock_panel: FakePanel
+) -> None:
+    """A file the panel already has gets status 3 for every window (check V17)."""
+    mock_panel.responder = lambda data: [ack(data, 3)]
+
+    await connection.async_send(plan(FIRST, NEXT, final_ack=True))
+
+    assert mock_panel.writes == [FIRST, NEXT]
+
+
+async def test_transfer_timings_are_logged(
+    connection: IPixelConnection,
+    mock_panel: FakePanel,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Each window of a transfer logs its writes and its ACK wait (check V17)."""
+    caplog.set_level(logging.DEBUG)
+    statuses = iter([[1], [1, 3]])
+    mock_panel.responder = lambda data: [ack(data, s) for s in next(statuses)]
+
+    await connection.async_send(plan(FIRST, NEXT, final_ack=True))
+
+    assert "Window 1/2 of test to AA:BB:CC:DD:EE:FF: 6 bytes written in" in caplog.text
+    assert "Window 2/2 of test" in caplog.text
+    assert "ACK 1" in caplog.text
+    assert "End of test acknowledged by AA:BB:CC:DD:EE:FF" in caplog.text
+    assert "Sent test to AA:BB:CC:DD:EE:FF: 12 bytes in 2 windows" in caplog.text
+
+    caplog.clear()
+    mock_panel.responder = mock_panel.answer
+    await connection.async_send(plan(BRIGHTNESS))
+    assert "Window" not in caplog.text
 
 
 async def test_request_returns_the_response(

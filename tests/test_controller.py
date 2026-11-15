@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import Callable
 import dataclasses
 from datetime import timedelta
+import logging
 from pathlib import Path
 
 from bleak.exc import BleakError
@@ -24,10 +25,14 @@ from pytest_homeassistant_custom_component.common import (
     async_fire_time_changed,
 )
 
-from custom_components.ipixel_color_se import connection as connection_module
+from custom_components.ipixel_color_se import (
+    connection as connection_module,
+    protocol,
+)
 from custom_components.ipixel_color_se.const import DOMAIN
 from custom_components.ipixel_color_se.controller import (
     RECONNECT_COOLDOWN,
+    RESTORE_RETRY_DELAY,
     RSSI_WRITE_INTERVAL,
     IPixelController,
 )
@@ -60,6 +65,9 @@ AUTO_RECONNECT = "switch.kitchen_pixel_auto_reconnect"
 ORIENTATION = "select.kitchen_pixel_orientation"
 MODE = "select.kitchen_pixel_mode"
 CLOCK_STYLE = "select.kitchen_pixel_clock_style"
+
+# Logged when the retry of a failed restore is due
+RETRYING = "Retrying the restore of AA:BB:CC:DD:EE:FF"
 
 # What a new connection sends when nothing was ever set
 DEFAULT_RESTORE = ["set_time", "orientation 0", "power on"]
@@ -111,6 +119,12 @@ def ignore(name: str, panel: FakePanel) -> object:
     return lambda data: [] if describe(data).startswith(name) else panel.answer(data)
 
 
+async def fire_after(hass: HomeAssistant, seconds: float) -> None:
+    """Run what was scheduled for the next seconds, without freezing time."""
+    async_fire_time_changed(hass, dt_util.utcnow() + timedelta(seconds=seconds))
+    await settle(hass)
+
+
 async def wait_for(condition: Callable[[], bool]) -> None:
     """Wait until condition holds, letting the executor work meanwhile.
 
@@ -132,7 +146,8 @@ def cat(config_dir: Path) -> Path:
 @pytest.fixture
 def no_ack_wait(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail fast when the panel doesn't acknowledge."""
-    monkeypatch.setattr(connection_module, "ACK_TIMEOUT", 0.01)
+    monkeypatch.setattr(protocol, "ACK_TIMEOUT", 0.01)
+    monkeypatch.setattr(protocol, "TRANSFER_ACK_TIMEOUT", 0.01)
     monkeypatch.setattr(connection_module, "RESPONSE_TIMEOUT", 0.01)
 
 
@@ -301,6 +316,132 @@ async def test_failed_restore_is_retried_before_the_next_command(
     assert mock_panel.commands == ["brightness 50"]
 
 
+async def test_failed_restore_is_retried(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """With the panel still connected, a failed restore is tried again after 15 s.
+
+    Until then the panel may show its built-in GIFs (check V14).
+    """
+    caplog.set_level(logging.DEBUG)
+    mock_panel.write_error = BleakError("write failed")
+    controller = await start(hass, mock_config_entry)
+    assert controller.connected
+    assert "Restoring the state of AA:BB:CC:DD:EE:FF failed: " in caplog.text
+
+    mock_panel.write_error = None
+    await fire_after(hass, RESTORE_RETRY_DELAY - 5)
+    assert mock_panel.commands == []
+
+    await fire_after(hass, RESTORE_RETRY_DELAY + 1)
+    assert RETRYING in caplog.text
+    assert mock_panel.commands == DEFAULT_RESTORE
+    assert "failed again" not in caplog.text
+
+
+async def test_restore_is_retried_once(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """If the retry fails too, the restore waits for the next command (plan §4.3)."""
+    mock_panel.write_error = BleakError("write failed")
+    controller = await start(hass, mock_config_entry)
+
+    await fire_after(hass, RESTORE_RETRY_DELAY + 1)
+    assert "Restoring the state of AA:BB:CC:DD:EE:FF failed again" in caplog.text
+
+    caplog.clear()
+    await fire_after(hass, 3 * RESTORE_RETRY_DELAY)
+    assert "failed" not in caplog.text
+
+    mock_panel.write_error = None
+    await controller.async_set_brightness(40)
+    assert mock_panel.commands == [*DEFAULT_RESTORE, "brightness 40"]
+
+
+async def test_restore_retry_after_a_command_restored_the_panel(
+    hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
+) -> None:
+    """A command that restored the panel first leaves the retry nothing to do."""
+    mock_panel.write_error = BleakError("write failed")
+    controller = await start(hass, mock_config_entry)
+    mock_panel.write_error = None
+    await controller.async_set_brightness(40)
+    mock_panel.writes.clear()
+
+    await fire_after(hass, RESTORE_RETRY_DELAY + 1)
+
+    assert mock_panel.commands == []
+
+
+async def test_restore_retry_never_takes_the_panel_back(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Disconnect during the wait cancels the retry: the panel stays free."""
+    caplog.set_level(logging.DEBUG)
+    mock_panel.write_error = BleakError("write failed")
+    controller = await start(hass, mock_config_entry)
+    mock_panel.write_error = None
+    await controller.async_disconnect()
+
+    await fire_after(hass, RESTORE_RETRY_DELAY + 1)
+
+    assert RETRYING not in caplog.text
+    assert not mock_panel.connected
+    assert mock_panel.connect_attempts == 1
+    assert mock_panel.commands == []
+
+
+async def test_restore_after_a_drop_isnt_retried(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A restore cut by a dropped connection waits for the next connection."""
+    caplog.set_level(logging.DEBUG)
+
+    def drop(_data: bytes) -> list[bytes]:
+        asyncio.get_running_loop().call_soon(mock_panel.client.drop)
+        return []
+
+    mock_panel.responder = drop
+    await start(hass, mock_config_entry)
+    assert "Restoring the state of AA:BB:CC:DD:EE:FF failed" in caplog.text
+    mock_panel.responder = mock_panel.answer
+
+    await fire_after(hass, RESTORE_RETRY_DELAY + 1)
+
+    assert RETRYING not in caplog.text
+    assert mock_panel.connect_attempts == 1
+    assert mock_panel.commands == ["set_time"]
+
+
+async def test_unloading_cancels_the_restore_retry(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Nothing is left to run after the entry is unloaded."""
+    caplog.set_level(logging.DEBUG)
+    mock_panel.write_error = BleakError("write failed")
+    await start(hass, mock_config_entry)
+    assert await hass.config_entries.async_unload(mock_config_entry.entry_id)
+
+    await fire_after(hass, RESTORE_RETRY_DELAY + 1)
+
+    assert RETRYING not in caplog.text
+
+
 async def test_commands_wait_for_the_restore(
     hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -419,6 +560,8 @@ async def test_state_survives_a_restart(
         (FakePanel.lose_power, "not_reachable"),
         # The panel doesn't acknowledge
         (lambda panel: setattr(panel, "responder", lambda _data: []), "command_failed"),
+        # The panel rejects the command (check V13)
+        (lambda panel: panel.rejecting.update(power=1), "command_failed"),
     ],
 )
 @pytest.mark.usefixtures("no_ack_wait")
@@ -1151,6 +1294,33 @@ async def test_restore_waits_for_ha_to_start(
 
 
 @pytest.mark.usefixtures("cat")
+async def test_failed_late_image_is_retried(
+    hass: HomeAssistant,
+    hass_storage: dict,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The image left for after HA's start is tried again with the restore."""
+    save_state(hass_storage, mock_config_entry, SHOWING_CAT)
+    hass.set_state(CoreState.starting)
+    await start(hass, mock_config_entry)
+    mock_panel.write_error = BleakError("write failed")
+
+    hass.set_state(CoreState.running)
+    hass.bus.async_fire(EVENT_HOMEASSISTANT_STARTED)
+    await settle(hass)
+    assert "Showing the image on AA:BB:CC:DD:EE:FF failed" in caplog.text
+
+    mock_panel.write_error = None
+    mock_panel.writes.clear()
+    await fire_after(hass, RESTORE_RETRY_DELAY + 1)
+
+    assert mock_panel.commands == ["set_time", "orientation 0", "gif"]
+    assert mock_panel.image is not None
+
+
+@pytest.mark.usefixtures("cat")
 async def test_power_cycle_brings_the_image_back(
     hass: HomeAssistant, mock_panel: FakePanel, mock_config_entry: MockConfigEntry
 ) -> None:
@@ -1398,6 +1568,34 @@ async def test_failed_transfer_keeps_the_state(
     assert err.value.translation_key == "command_failed"
     assert controller.state == DisplayState()
     assert hass.states.get(PLAYER).state == "idle"
+
+
+@pytest.mark.parametrize(("rejections", "sent"), [(1, ["gif", "gif"]), (2, [])])
+@pytest.mark.usefixtures("cat")
+async def test_rejected_image_is_sent_again(
+    hass: HomeAssistant,
+    mock_panel: FakePanel,
+    mock_config_entry: MockConfigEntry,
+    rejections: int,
+    sent: list[str],
+) -> None:
+    """A transfer the panel rejects gets one more try, then fails visibly (V13)."""
+    controller = await start(hass, mock_config_entry)
+    mock_panel.writes.clear()
+    mock_panel.rejecting["gif"] = rejections
+
+    if sent:
+        await controller.async_play_media(CAT.media_id)
+        assert controller.state.mode is Mode.IMAGE
+    else:
+        with pytest.raises(HomeAssistantError) as err:
+            await controller.async_play_media(CAT.media_id)
+        assert err.value.translation_key == "command_failed"
+        assert "rejected image" in err.value.translation_placeholders["error"]
+        assert controller.state == DisplayState()
+
+    assert mock_panel.commands == ["gif", "gif"]
+    assert (mock_panel.image is not None) == bool(sent)
 
 
 async def test_media_source_image_survives_a_restart(

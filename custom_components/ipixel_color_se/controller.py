@@ -21,7 +21,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
-from homeassistant.helpers.event import async_track_time_change
+from homeassistant.helpers.event import async_call_later, async_track_time_change
 from homeassistant.helpers.start import async_at_started
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
@@ -41,6 +41,11 @@ SAVE_DELAY = 1.0
 # Seconds to wait after a failed connection attempt before reconnecting by
 # ourselves again (F3.3). A command still connects at once.
 RECONNECT_COOLDOWN = 30.0
+
+# Seconds before trying once more a restore that failed in the background,
+# with the panel still connected (02-fixes plan §3.4). Until then the panel
+# may show anything, its built-in GIFs included (check V14).
+RESTORE_RETRY_DELAY = 15.0
 
 # The panel advertises several times a second, and its RSSI swings by 5-6 dBm
 # from one advertisement to the next: write the signal strength this often at
@@ -115,6 +120,8 @@ class IPixelController:
         self._rssi_peak: int | None = None
         self._rssi_written = 0.0
         self._needs_restore = False
+        # Cancels the pending retry of a failed restore
+        self._restore_retry: CALLBACK_TYPE | None = None
         self._lost = False
         self._stopped = False
         self._hass_started = False
@@ -612,13 +619,23 @@ class IPixelController:
             )
 
     async def _async_show_late_image(self) -> None:
-        """Show the image, unless it was sent or replaced meanwhile."""
+        """Show the image, unless it was sent or replaced meanwhile.
+
+        If the panel doesn't take it, the restore is tried again soon, and
+        otherwise before the next command: a transfer that fails halfway may
+        leave anything on the panel.
+        """
         try:
             async with self._async_operation(connect=False) as connected:
                 if connected and self.image_shown and not self._image_on_panel:
-                    await self._async_show_content()
+                    try:
+                        await self._async_show_content()
+                    except IPixelError:
+                        self._needs_restore = True
+                        raise
         except HomeAssistantError as err:
             _LOGGER.warning("Showing the image on %s failed: %s", self.address, err)
+            self._async_schedule_restore_retry()
 
     @callback
     def _async_reconnect_soon(self) -> None:
@@ -653,13 +670,61 @@ class IPixelController:
                 try:
                     await self._async_restore()
                 except IPixelError as err:
-                    # Tried again before the next command
                     _LOGGER.warning(
                         "Restoring the state of %s failed: %s", self.address, err
                     )
                     self.last_error = str(err)
+                    self._async_schedule_restore_retry()
         finally:
             self._connect_task = None
+
+    @callback
+    def _async_schedule_restore_retry(self) -> None:
+        """Try the restore once more soon, if the panel is still connected.
+
+        A restore cut by a disconnection isn't retried: the next connection
+        restores the panel anyway.
+        """
+        if self._restore_retry is not None or not self.connected or self._stopped:
+            return
+        self._restore_retry = async_call_later(
+            self.hass, RESTORE_RETRY_DELAY, self._async_restore_retry_due
+        )
+
+    @callback
+    def _async_restore_retry_due(self, _now: datetime) -> None:
+        """Start the retry of a failed restore."""
+        self._restore_retry = None
+        _LOGGER.debug("Retrying the restore of %s, if still needed", self.address)
+        self.entry.async_create_background_task(
+            self.hass,
+            self._async_retry_restore(),
+            f"{DOMAIN} retry restore {self.address}",
+        )
+
+    async def _async_retry_restore(self) -> None:
+        """Restore the panel, unless that's no longer needed.
+
+        A command may have restored it meanwhile. If this fails too, the
+        restore runs before the next command (plan §4.3).
+        """
+        async with self._lock:
+            if not self.connected or not self._needs_restore:
+                return
+            try:
+                await self._async_restore()
+            except IPixelError as err:
+                _LOGGER.warning(
+                    "Restoring the state of %s failed again: %s", self.address, err
+                )
+                self.last_error = str(err)
+
+    @callback
+    def _async_cancel_restore_retry(self) -> None:
+        """Forget the pending retry of a failed restore, if any."""
+        if self._restore_retry is not None:
+            self._restore_retry()
+            self._restore_retry = None
 
     async def _async_cancel_reconnect(self) -> None:
         """Stop a background connection attempt, if one is running."""
@@ -730,6 +795,9 @@ class IPixelController:
     def _handle_disconnected(self, expected: bool) -> None:
         """Record a disconnect, warning when it wasn't asked for."""
         self.last_disconnected = dt_util.utcnow()
+        # The next connection restores the panel anyway. Unloading the entry
+        # disconnects too, so no retry outlives it.
+        self._async_cancel_restore_retry()
         # HA's Bluetooth may have forgotten the panel while it was connected
         # and silent (check V4): ask again
         self.reachable = async_address_present(
